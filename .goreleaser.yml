@@ -1,0 +1,57 @@
+version: 2
+
+project_name: handshake
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - main: ./cmd/handshake
+    env:
+      - CGO_ENABLED=0 # modernc.org/sqlite is pure Go — clean cross-compiles
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+homebrew_casks:
+  - name: handshake
+    repository:
+      owner: ThisisBankole
+      name: homebrew-tools
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: https://github.com/ThisisBankole/handshake
+    description: Session portability daemon for AI agents
+    binaries: [handshake]
+    caveats: |
+      To finish setup:
+        handshake init              # register with your agents (one-time)
+        handshake install-service   # start the daemon on login
+    # Unsigned binary: clear the quarantine flag so Gatekeeper doesn't block it.
+    hooks:
+      post:
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/handshake"]
+          end

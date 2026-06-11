@@ -11,10 +11,10 @@ import (
 	"handshake/plugins/opencode"
 )
 
-const (
-	version    = "0.1.0"
-	listenAddr = "localhost:8765"
-)
+// version is stamped by GoReleaser at build time (-X main.version=...).
+var version = "0.1.0-dev"
+
+const listenAddr = "localhost:8765"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -42,6 +42,12 @@ func main() {
 			os.Exit(1)
 		}
 		restoreCmd(dbPath, os.Args[2])
+	case "install-service":
+		installServiceCmd(homeDir)
+	case "uninstall-service":
+		uninstallServiceCmd(homeDir)
+	case "version", "--version", "-v":
+		fmt.Println("handshake " + version)
 	default:
 		fmt.Printf("Unknown command: %s\n\n", os.Args[1])
 		usage()
@@ -56,6 +62,9 @@ func usage() {
 	fmt.Println("  serve            Start the MCP + ingest server on " + listenAddr)
 	fmt.Println("  list             List checkpointed sessions")
 	fmt.Println("  restore <title>  Print the handoff brief for a session")
+	fmt.Println("  install-service    Start the daemon on login (launchd/systemd)")
+	fmt.Println("  uninstall-service  Remove the login service")
+	fmt.Println("  version          Print the version")
 }
 
 func openDB(dbPath string) *db.Database {
@@ -87,14 +96,19 @@ func initCmd(homeDir, dbPath string) {
 }
 
 func serveCmd(homeDir, dbPath string) {
+	addr := listenAddr
+	if env := os.Getenv("HANDSHAKE_ADDR"); env != "" {
+		addr = env
+	}
+
 	database := openDB(dbPath)
 	defer database.Close()
 
 	srv := server.New("handshake", version, homeDir, database)
-	fmt.Printf("Handshake %s listening on http://%s\n", version, listenAddr)
-	fmt.Printf("  MCP endpoint:    http://%s/mcp\n", listenAddr)
-	fmt.Printf("  Ingest endpoint: http://%s/ingest\n", listenAddr)
-	if err := srv.Serve(listenAddr); err != nil {
+	fmt.Printf("Handshake %s listening on http://%s\n", version, addr)
+	fmt.Printf("  MCP endpoint:    http://%s/mcp\n", addr)
+	fmt.Printf("  Ingest endpoint: http://%s/ingest\n", addr)
+	if err := srv.Serve(addr); err != nil {
 		fmt.Printf("Server error: %v\n", err)
 		os.Exit(1)
 	}

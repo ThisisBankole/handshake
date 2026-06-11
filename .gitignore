@@ -16,3 +16,4 @@
 
 # OS noise
 .DS_Store
+/dist/
