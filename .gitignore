@@ -1,0 +1,13 @@
+# Compiled binary (rebuild with: go build -o handshake ./cmd/handshake)
+/handshake
+
+# Internal docs and saved reference PDFs
+/docs/
+
+# Local state and test artifacts
+.handshake/
+.smoke-fixture/
+*.handshake.bak
+
+# OS noise
+.DS_Store
