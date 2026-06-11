@@ -9,5 +9,8 @@
 .smoke-fixture/
 *.handshake.bak
 
+# Test scripts
+*.sh
+
 # OS noise
 .DS_Store
