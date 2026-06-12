@@ -17,11 +17,6 @@ var version = "0.1.0-dev"
 const listenAddr = "localhost:8765"
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(1)
-	}
-
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Printf("Failed to determine home directory: %v\n", err)
@@ -29,7 +24,16 @@ func main() {
 	}
 	dbPath := filepath.Join(homeDir, ".handshake", "sessions.db")
 
+	// No arguments — run guided setup (triggered by brew post-install hook
+	// and friendly for first-time users who just type "handshake").
+	if len(os.Args) < 2 {
+		setupCmd(homeDir, dbPath)
+		return
+	}
+
 	switch os.Args[1] {
+	case "setup":
+		setupCmd(homeDir, dbPath)
 	case "init":
 		initCmd(homeDir, dbPath)
 	case "serve":
@@ -50,6 +54,8 @@ func main() {
 		uninstallCmd(homeDir)
 	case "version", "--version", "-v":
 		fmt.Println("handshake " + version)
+	case "help", "--help", "-h":
+		usage()
 	default:
 		fmt.Printf("Unknown command: %s\n\n", os.Args[1])
 		usage()
@@ -59,8 +65,10 @@ func main() {
 
 func usage() {
 	fmt.Println("Usage: handshake <command>")
+	fmt.Println()
 	fmt.Println("Commands:")
-	fmt.Println("  init               Create the database, install the OpenCode plugin, register with agents")
+	fmt.Println("  setup              Guided setup — registers with agents, installs service (default)")
+	fmt.Println("  init               Non-interactive setup — create database and register with agents")
 	fmt.Println("  serve              Start the MCP + ingest server on " + listenAddr)
 	fmt.Println("  list               List checkpointed sessions")
 	fmt.Println("  restore <title>    Print the handoff brief for a session")
@@ -68,6 +76,7 @@ func usage() {
 	fmt.Println("  uninstall-service  Remove the login service")
 	fmt.Println("  uninstall          Remove Handshake from all agents and clean up")
 	fmt.Println("  version            Print the version")
+	fmt.Println("  help               Show this message")
 }
 
 func openDB(dbPath string) *db.Database {
@@ -96,26 +105,6 @@ func initCmd(homeDir, dbPath string) {
 	fmt.Println("\nRegistering Handshake as an MCP server with each agent:")
 	registerAgents(homeDir)
 	fmt.Println("\nThen start the daemon with: handshake serve")
-}
-
-func uninstallCmd(homeDir string) {
-	fmt.Println("This will remove Handshake from all agents.")
-	fmt.Println()
-
-	// Stop the daemon first if it's running as a service.
-	uninstallServiceCmd(homeDir)
-	fmt.Println()
-
-	// Remove from all agents and clean up config files.
-	deleteDB := promptYesNo("Delete session database at ~/.handshake/sessions.db? Your session history will be lost.")
-	fmt.Println()
-	deregisterAgents(homeDir, deleteDB)
-
-	fmt.Println()
-	fmt.Println("✓ Handshake uninstalled.")
-	if !deleteDB {
-		fmt.Println("  Your session database was kept. Delete it manually with: rm -rf ~/.handshake")
-	}
 }
 
 func serveCmd(homeDir, dbPath string) {

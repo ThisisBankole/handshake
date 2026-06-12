@@ -42,16 +42,20 @@ homebrew_casks:
       name: homebrew-tools
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     homepage: https://github.com/ThisisBankole/handshake
-    description: Session portability daemon for AI agents
+    description: Session portability daemon for AI coding agents
     binaries: [handshake]
     caveats: |
-      To finish setup:
-        handshake init              # register with your agents (one-time)
-        handshake install-service   # start the daemon on login
+      Handshake is now installed. The setup wizard will guide you through
+      registering with your agents and starting the daemon.
+
+      If the wizard didn't run, start it manually with:
+        handshake setup
     # Unsigned binary: clear the quarantine flag so Gatekeeper doesn't block it.
+    # Then run the guided setup wizard automatically.
     hooks:
       post:
         install: |
           if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
             system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/handshake"]
           end
+          system_command "#{staged_path}/handshake", args: ["setup"]
