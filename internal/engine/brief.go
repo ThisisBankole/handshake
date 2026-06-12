@@ -60,14 +60,25 @@ func (g *BriefGenerator) GenerateBrief(sessionID string) (*HandoffBrief, error) 
 }
 
 const (
-	minRecentMessages = 12
-	maxRecentMessages = 30
-	goalMaxChars      = 600
-	excerptMaxChars   = 400
-	stateMaxChars     = 1200
+	// fullTranscriptThreshold is the maximum number of substantive messages
+	// before switching from full transcript to sampled mode.
+	fullTranscriptThreshold = 50
+
+	// sampledTotal is the number of messages included in sampled mode.
+	// Always 50 regardless of how long the session is.
+	sampledTotal = 50
+
+	// Zone sizes within the sampled window.
+	sampledHead   = 10 // first N messages — original goal and early decisions
+	sampledMiddle = 20 // N messages from the centre — architectural decisions
+	sampledTail   = 20 // last N messages — current state and recent work
+
+	goalMaxChars  = 600
+	stateMaxChars = 1200
+	clipMaxChars  = 900 
 )
 
-// excerptMessage is a conversation message after tool-noise filtering:
+// excerptMessage is a conversation message after tool-noise filtering.
 // tool-role messages and tool-call markers are collapsed into toolActivity
 // counts attached to the preceding substantive message.
 type excerptMessage struct {
@@ -76,10 +87,10 @@ type excerptMessage struct {
 	toolActivity int
 }
 
-// buildBrief produces a structured markdown handoff document. Handshake does
-// no LLM summarisation itself: the authoritative state comes from the source
-// agent's checkpoint summary when present; otherwise the latest substantive
-// assistant message stands in for it.
+// buildBrief produces a structured markdown handoff document.
+// Handshake does no LLM summarisation itself: the authoritative state comes
+// from the source agent's checkpoint summary when present; otherwise the
+// latest substantive assistant message stands in for it.
 func buildBrief(session *db.Session, messages []*db.Message) string {
 	var b strings.Builder
 
@@ -96,6 +107,7 @@ func buildBrief(session *db.Session, messages []*db.Message) string {
 	b.WriteString(fmt.Sprintf("- **Messages:** %d\n\n", len(messages)))
 
 	excerpts := filterForExcerpt(messages)
+	fullMode := len(excerpts) <= fullTranscriptThreshold
 
 	if goal := firstUserContent(excerpts); goal != "" {
 		b.WriteString("## Original Goal\n\n")
@@ -112,19 +124,33 @@ func buildBrief(session *db.Session, messages []*db.Message) string {
 		b.WriteString(clip(last, stateMaxChars) + "\n\n")
 	}
 
-	recent := excerpts
-	window := recentWindow(len(excerpts))
-	if len(recent) > window {
-		b.WriteString(fmt.Sprintf("## Recent Conversation\n\n_(last %d of %d substantive messages; tool output omitted)_\n\n", window, len(excerpts)))
-		recent = recent[len(recent)-window:]
-	} else if len(recent) > 0 {
-		b.WriteString("## Recent Conversation\n\n_(tool output omitted)_\n\n")
-	}
-	for _, msg := range recent {
-		b.WriteString(fmt.Sprintf("**%s:** %s\n\n", msg.role, clip(msg.content, excerptMaxChars)))
-		if msg.toolActivity > 0 {
-			b.WriteString(fmt.Sprintf("_[%d tool interaction(s) omitted]_\n\n", msg.toolActivity))
+	// Select which messages to show and write the conversation section.
+	if fullMode {
+		// ≤50 substantive messages — show everything with no clipping.
+		b.WriteString("## Full Conversation\n\n_(tool output omitted)_\n\n")
+		for _, msg := range excerpts {
+			b.WriteString(fmt.Sprintf("**%s:** %s\n\n", msg.role, msg.content))
+			if msg.toolActivity > 0 {
+				b.WriteString(fmt.Sprintf("_[%d tool interaction(s) omitted]_\n\n", msg.toolActivity))
+			}
 		}
+	} else {
+		// >50 substantive messages — sample head, middle, and tail.
+		head, middle, tail := sampleExcerpts(excerpts)
+
+		b.WriteString(fmt.Sprintf(
+			"## Conversation (sampled %d of %d substantive messages; tool output omitted)\n\n",
+			len(head)+len(middle)+len(tail), len(excerpts),
+		))
+
+		b.WriteString("### Beginning\n\n")
+		writeExcerpts(&b, head, true)
+
+		b.WriteString("### Middle\n\n")
+		writeExcerpts(&b, middle, true)
+
+		b.WriteString("### Recent\n\n")
+		writeExcerpts(&b, tail, true)
 	}
 
 	b.WriteString("## Instructions for the Receiving Agent\n\n")
@@ -137,6 +163,64 @@ func buildBrief(session *db.Session, messages []*db.Message) string {
 	b.WriteString("Before making changes, state your understanding of the current state and your intended next step to the user in one or two sentences.\n")
 
 	return b.String()
+}
+
+// sampleExcerpts splits excerpts into head, middle, and tail zones.
+// Total is always sampledTotal (50) messages:
+//   - head:   first sampledHead (10)
+//   - middle: sampledMiddle (20) messages centred on the session midpoint
+//   - tail:   last sampledTail (20)
+//
+// Zones are deduplicated — if they would overlap (short sessions that still
+// exceed the threshold), messages are only shown once.
+func sampleExcerpts(msgs []*excerptMessage) (head, middle, tail []*excerptMessage) {
+	n := len(msgs)
+
+	// Head — first 10
+	headEnd := sampledHead
+	if headEnd > n {
+		headEnd = n
+	}
+	head = msgs[:headEnd]
+
+	// Tail — last 20
+	tailStart := n - sampledTail
+	if tailStart < headEnd {
+		tailStart = headEnd
+	}
+	tail = msgs[tailStart:]
+
+	// Middle — 20 messages centred on the midpoint, not overlapping head/tail
+	mid := n / 2
+	midStart := mid - sampledMiddle/2
+	midEnd := mid + sampledMiddle/2
+
+	if midStart < headEnd {
+		midStart = headEnd
+	}
+	if midEnd > tailStart {
+		midEnd = tailStart
+	}
+	if midStart < midEnd {
+		middle = msgs[midStart:midEnd]
+	}
+
+	return head, middle, tail
+}
+
+// writeExcerpts writes a slice of excerptMessages to the builder.
+// When clip is true, message content is clipped at clipMaxChars.
+func writeExcerpts(b *strings.Builder, msgs []*excerptMessage, applyClip bool) {
+	for _, msg := range msgs {
+		content := msg.content
+		if applyClip {
+			content = clip(content, clipMaxChars)
+		}
+		b.WriteString(fmt.Sprintf("**%s:** %s\n\n", msg.role, content))
+		if msg.toolActivity > 0 {
+			b.WriteString(fmt.Sprintf("_[%d tool interaction(s) omitted]_\n\n", msg.toolActivity))
+		}
+	}
 }
 
 // filterForExcerpt keeps user/assistant messages with real text, strips
@@ -170,6 +254,7 @@ func filterForExcerpt(messages []*db.Message) []*excerptMessage {
 
 // stripToolMarkers removes lines that are only tool-call placeholders
 // produced by the adapters, e.g. "[tool: Bash]" or "[3 tool result(s)]".
+// It also strips Hermes internal skill invocation lines ("[IMPORTANT: ...").
 func stripToolMarkers(content string) string {
 	var kept []string
 	for _, line := range strings.Split(content, "\n") {
@@ -180,22 +265,13 @@ func stripToolMarkers(content string) string {
 		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "tool result(s)]") {
 			continue
 		}
+		// Hermes skill invocation noise
+		if strings.HasPrefix(trimmed, "[IMPORTANT:") {
+			continue
+		}
 		kept = append(kept, line)
 	}
 	return strings.TrimSpace(strings.Join(kept, "\n"))
-}
-
-// recentWindow scales the excerpt size with session length: an eighth of the
-// substantive messages, clamped to [minRecentMessages, maxRecentMessages].
-func recentWindow(total int) int {
-	window := total / 8
-	if window < minRecentMessages {
-		return minRecentMessages
-	}
-	if window > maxRecentMessages {
-		return maxRecentMessages
-	}
-	return window
 }
 
 func firstUserContent(messages []*excerptMessage) string {

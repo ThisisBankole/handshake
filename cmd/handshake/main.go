@@ -46,6 +46,8 @@ func main() {
 		installServiceCmd(homeDir)
 	case "uninstall-service":
 		uninstallServiceCmd(homeDir)
+	case "uninstall":
+		uninstallCmd(homeDir)
 	case "version", "--version", "-v":
 		fmt.Println("handshake " + version)
 	default:
@@ -58,13 +60,14 @@ func main() {
 func usage() {
 	fmt.Println("Usage: handshake <command>")
 	fmt.Println("Commands:")
-	fmt.Println("  init             Create the database, install the OpenCode plugin, print MCP config")
-	fmt.Println("  serve            Start the MCP + ingest server on " + listenAddr)
-	fmt.Println("  list             List checkpointed sessions")
-	fmt.Println("  restore <title>  Print the handoff brief for a session")
+	fmt.Println("  init               Create the database, install the OpenCode plugin, register with agents")
+	fmt.Println("  serve              Start the MCP + ingest server on " + listenAddr)
+	fmt.Println("  list               List checkpointed sessions")
+	fmt.Println("  restore <title>    Print the handoff brief for a session")
 	fmt.Println("  install-service    Start the daemon on login (launchd/systemd)")
 	fmt.Println("  uninstall-service  Remove the login service")
-	fmt.Println("  version          Print the version")
+	fmt.Println("  uninstall          Remove Handshake from all agents and clean up")
+	fmt.Println("  version            Print the version")
 }
 
 func openDB(dbPath string) *db.Database {
@@ -93,6 +96,26 @@ func initCmd(homeDir, dbPath string) {
 	fmt.Println("\nRegistering Handshake as an MCP server with each agent:")
 	registerAgents(homeDir)
 	fmt.Println("\nThen start the daemon with: handshake serve")
+}
+
+func uninstallCmd(homeDir string) {
+	fmt.Println("This will remove Handshake from all agents.")
+	fmt.Println()
+
+	// Stop the daemon first if it's running as a service.
+	uninstallServiceCmd(homeDir)
+	fmt.Println()
+
+	// Remove from all agents and clean up config files.
+	deleteDB := promptYesNo("Delete session database at ~/.handshake/sessions.db? Your session history will be lost.")
+	fmt.Println()
+	deregisterAgents(homeDir, deleteDB)
+
+	fmt.Println()
+	fmt.Println("✓ Handshake uninstalled.")
+	if !deleteDB {
+		fmt.Println("  Your session database was kept. Delete it manually with: rm -rf ~/.handshake")
+	}
 }
 
 func serveCmd(homeDir, dbPath string) {
