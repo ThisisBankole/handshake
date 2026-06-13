@@ -9,6 +9,7 @@ import (
 	"handshake/internal/engine"
 	"handshake/internal/server"
 	"handshake/plugins/opencode"
+	"handshake/internal/adapters"
 )
 
 // version is stamped by GoReleaser at build time (-X main.version=...).
@@ -104,6 +105,9 @@ func initCmd(homeDir, dbPath string) {
 
 	fmt.Println("\nRegistering Handshake as an MCP server with each agent:")
 	registerAgents(homeDir)
+	registerClaudeCodeHooks(homeDir)
+	registerHermesPlugin(homeDir)
+	registerCodexHooks(homeDir)
 	fmt.Println("\nThen start the daemon with: handshake serve")
 }
 
@@ -129,6 +133,9 @@ func serveCmd(homeDir, dbPath string) {
 func listCmd(dbPath string) {
 	database := openDB(dbPath)
 	defer database.Close()
+	// Auto-sync Codex sessions before listing
+	homeDir, _ := os.UserHomeDir()
+	adapters.IngestCodexSessions(database, homeDir)
 
 	sessions, err := database.ListSessions("")
 	if err != nil {

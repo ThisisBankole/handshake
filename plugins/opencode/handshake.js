@@ -1,74 +1,145 @@
 // Handshake session-sync plugin for OpenCode.
 // Installed by `handshake init` into ~/.config/opencode/plugins/handshake.js
 //
-// Streams session updates to the local Handshake daemon (localhost:8765) so
-// sessions can be restored from other agents, and injects the handoff-brief
-// structure into OpenCode's own compaction.
+// Autonomous session portability:
+//   session.updated           → sync messages to Handshake in real time
+//   session.idle              → regenerate brief after every completed turn
+//   session.compacted         → capture OpenCode's compaction summary
+//   experimental.session.compacting → inject handoff brief format into compaction
 
 const BASE_URL = process.env.HANDSHAKE_URL ?? "http://localhost:8765"
-const SYNC_DEBOUNCE_MS = 1500
+
+// Debounce timers keyed by session ID
+const syncPending = new Map()
+const briefPending = new Map()
+
+const SYNC_DEBOUNCE_MS = 1500   // wait 1.5s after last update before syncing
+const BRIEF_DEBOUNCE_MS = 5000  // wait 5s after idle before regenerating brief
+
+// ── Sync messages to Handshake ────────────────────────────────────────────────
+
+const syncSession = async (sessionID, client) => {
+  syncPending.delete(sessionID)
+  try {
+    const info = (await client.session.get({ path: { id: sessionID } })).data
+    if (!info) return
+
+    const entries = (await client.session.messages({ path: { id: sessionID } })).data ?? []
+
+    const messages = entries
+      .map((entry) => {
+        const m = entry.info ?? entry
+        const parts = entry.parts ?? []
+        const content = parts
+          .map((p) => {
+            if (p.type === "text" && p.text) return p.text
+            if (p.type === "tool") return `[tool: ${p.tool ?? ""}]`
+            return ""
+          })
+          .filter(Boolean)
+          .join("\n")
+        return {
+          id: m.id,
+          role: m.role,
+          content,
+          created_at: Math.floor((m.time?.created ?? Date.now()) / 1000),
+        }
+      })
+      .filter((m) => m.id && m.content)
+
+    await fetch(`${BASE_URL}/ingest`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        agent: "opencode",
+        session: {
+          id: info.id,
+          title: info.title ?? "",
+          working_dir: info.directory ?? "",
+          model: info.model ?? "",
+          created_at: Math.floor((info.time?.created ?? Date.now()) / 1000),
+          updated_at: Math.floor((info.time?.updated ?? Date.now()) / 1000),
+        },
+        messages,
+      }),
+    })
+  } catch {
+    // Handshake daemon not running or transient error — never break OpenCode.
+  }
+}
+
+// ── Regenerate brief ──────────────────────────────────────────────────────────
+
+const generateBrief = async (sessionID) => {
+  briefPending.delete(sessionID)
+  try {
+    await fetch(`${BASE_URL}/generate-brief`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ session_id: sessionID }),
+    })
+  } catch {
+    // Handshake daemon not running — silently skip.
+  }
+}
+
+// ── Plugin export ─────────────────────────────────────────────────────────────
 
 export const HandshakeSync = async ({ client }) => {
-  const pending = new Map()
-
-  const sync = async (sessionID) => {
-    pending.delete(sessionID)
-    try {
-      const info = (await client.session.get({ path: { id: sessionID } })).data
-      if (!info) return
-      const entries = (await client.session.messages({ path: { id: sessionID } })).data ?? []
-
-      const messages = entries
-        .map((entry) => {
-          const m = entry.info ?? entry
-          const parts = entry.parts ?? []
-          const content = parts
-            .map((p) => {
-              if (p.type === "text" && p.text) return p.text
-              if (p.type === "tool") return `[tool: ${p.tool ?? ""}]`
-              return ""
-            })
-            .filter(Boolean)
-            .join("\n")
-          return {
-            id: m.id,
-            role: m.role,
-            content,
-            created_at: Math.floor((m.time?.created ?? Date.now()) / 1000),
-          }
-        })
-        .filter((m) => m.id && m.content)
-
-      await fetch(`${BASE_URL}/ingest`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          agent: "opencode",
-          session: {
-            id: info.id,
-            title: info.title ?? "",
-            working_dir: info.directory ?? "",
-            model: info.model ?? "",
-            created_at: Math.floor((info.time?.created ?? Date.now()) / 1000),
-            updated_at: Math.floor((info.time?.updated ?? Date.now()) / 1000),
-          },
-          messages,
-        }),
-      })
-    } catch {
-      // Handshake daemon not running, or transient API error — never break OpenCode.
-    }
-  }
-
   return {
+    // 1. Sync messages in real time on every session update.
     event: async ({ event }) => {
-      if (event.type !== "session.updated") return
-      const id = event.properties?.info?.id
-      if (!id) return
-      clearTimeout(pending.get(id))
-      pending.set(id, setTimeout(() => sync(id), SYNC_DEBOUNCE_MS))
+      if (event.type === "session.updated") {
+        const id = event.properties?.info?.id
+        if (!id) return
+        clearTimeout(syncPending.get(id))
+        syncPending.set(id, setTimeout(() => syncSession(id, client), SYNC_DEBOUNCE_MS))
+        return
+      }
+
+      // 2. Regenerate brief when session goes idle (agent finished responding).
+      if (event.type === "session.idle") {
+        const id = event.properties?.info?.id
+        if (!id) return
+        clearTimeout(briefPending.get("brief:" + id))
+        briefPending.set("brief:" + id, setTimeout(() => generateBrief(id), BRIEF_DEBOUNCE_MS))
+        return
+      }
+
+      // 3. Capture compaction summary when OpenCode finishes compacting.
+      if (event.type === "session.compacted") {
+        const id = event.properties?.info?.id
+        const summary = event.properties?.summary ?? event.properties?.info?.summary ?? ""
+        if (!id) return
+
+        try {
+          // Store the compaction summary as the session summary in Handshake.
+          // This becomes the "Current State & Next Steps" section of the brief.
+          await fetch(`${BASE_URL}/ingest`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              agent: "opencode",
+              session: {
+                id,
+                summary,
+                updated_at: Math.floor(Date.now() / 1000),
+              },
+              messages: [],
+            }),
+          })
+
+          // Regenerate brief immediately after capturing the summary.
+          await generateBrief(id)
+        } catch {
+          // Silently skip.
+        }
+        return
+      }
     },
 
+    // 4. Inject handoff brief format into OpenCode's compaction prompt.
+    // This shapes the summary OpenCode generates — captured above in session.compacted.
     "experimental.session.compacting": async (_input, output) => {
       output.context.push(`## Handshake handoff state
 

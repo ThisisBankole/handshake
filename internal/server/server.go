@@ -41,6 +41,7 @@ func (s *Server) Serve(addr string) error {
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", mcpserver.NewStreamableHTTPServer(s.mcp))
 	mux.HandleFunc("/ingest", s.handleIngest)
+	mux.HandleFunc("/generate-brief", s.handleGenerateBrief)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "ok")
@@ -58,7 +59,7 @@ func (s *Server) addTools() {
 			),
 			mcp.WithString("agent",
 				mcp.Description("Which agent this session belongs to"),
-				mcp.Enum("claude-code", "opencode", "hermes"),
+				mcp.Enum("claude-code", "opencode", "hermes", "codex"),
 				mcp.Required(),
 			),
 			mcp.WithString("title",
@@ -156,6 +157,8 @@ func (s *Server) readNativeSession(agent, sessionID string) (*adapters.SessionDa
 		return adapters.NewOpenCodeAdapter(s.homeDir).ReadSession(sessionID)
 	case "hermes":
 		return adapters.NewHermesAdapter(s.homeDir).ReadSession(sessionID)
+	case "codex":
+		return adapters.NewCodexAdapter(s.homeDir).ReadSession(sessionID)
 	default:
 		return nil, fmt.Errorf("unknown agent: %s", agent)
 	}
@@ -163,6 +166,10 @@ func (s *Server) readNativeSession(agent, sessionID string) (*adapters.SessionDa
 
 func (s *Server) handleListSessions(request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	agent := request.GetString("agent", "")
+
+	if agent == "" || agent == "codex" {
+		adapters.IngestCodexSessions(s.db, s.homeDir)
+	}
 
 	sessions, err := s.db.ListSessions(agent)
 	if err != nil {

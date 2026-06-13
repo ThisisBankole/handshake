@@ -29,6 +29,13 @@ type ingestPayload struct {
 	} `json:"messages"`
 }
 
+// generateBriefPayload is the JSON body POSTed to /generate-brief.
+// Called autonomously by agent plugins (e.g. OpenCode session.idle hook)
+// to regenerate and cache the brief for a session without a full checkpoint.
+type generateBriefPayload struct {
+	SessionID string `json:"session_id"`
+}
+
 func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -74,4 +81,33 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"ok":true,"session_id":%q,"messages":%d}`+"\n", session.ID, len(session.Messages))
+}
+
+// handleGenerateBrief regenerates and caches the brief for a session.
+// Called autonomously by agent plugins when a session goes idle or compacts,
+// so the brief is always fresh and ready when the user switches agents.
+func (s *Server) handleGenerateBrief(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var payload generateBriefPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if payload.SessionID == "" {
+		http.Error(w, "session_id is required", http.StatusBadRequest)
+		return
+	}
+
+	brief, err := s.engine.GenerateBrief(payload.SessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"ok":true,"session_id":%q,"title":%q}`+"\n", brief.SessionID, brief.Title)
 }

@@ -1,0 +1,17 @@
+
+#
+# This file registers the Handshake plugin with Hermes.
+# Hermes discovers it automatically at startup — no config changes needed.
+#
+# Events:
+#   post_llm_call      → fires after every completed turn (agent finished responding)
+#                        used to sync messages and regenerate the brief in real time
+#   on_session_finalize → fires when Hermes tears down a session (exit, compaction,
+#                        gateway reset) — used to capture final state
+
+name: handshake
+description: "Sync sessions to Handshake for cross-agent portability"
+version: "1.0.0"
+events:
+  - post_llm_call
+  - on_session_finalize

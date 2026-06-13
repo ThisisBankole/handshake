@@ -56,6 +56,9 @@ func setupCmd(homeDir, dbPath string) {
 	fmt.Println()
 	fmt.Println("  Registering with your agents:")
 	registerAgentsIndented(homeDir)
+	registerClaudeCodeHooks(homeDir)
+	registerHermesPlugin(homeDir)
+	registerCodexHooks(homeDir)
 
 	fmt.Println()
 	fmt.Println("  ✓ Step 1 complete.")
@@ -64,7 +67,7 @@ func setupCmd(homeDir, dbPath string) {
 	// ── Step 2: install as background service ──────────────────────────────
 
 	fmt.Println("Step 2 of 3 — Start Handshake automatically on login.")
-	
+
 	fmt.Println()
 
 	if confirmYN("Install as a background service?", true) {
@@ -133,6 +136,10 @@ func uninstallCmd(homeDir string) {
 	deregisterOpenCode(homeDir)
 	deregisterHermes(homeDir)
 	removeOpenCodePlugin(homeDir)
+	deregisterClaudeCodeHooks(homeDir)
+	deregisterHermesPlugin(homeDir)
+	deregisterCodexHooks(homeDir)
+	//deregisterCodexMCP(homeDir)
 	fmt.Println()
 
 	// Ask about database
