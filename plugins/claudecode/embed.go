@@ -9,3 +9,6 @@ var PreCompactHook []byte
 
 //go:embed post_compact.py
 var PostCompactHook []byte
+
+//go:embed stop.py
+var StopHook []byte

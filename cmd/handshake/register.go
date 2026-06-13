@@ -30,7 +30,7 @@ func deregisterAgents(homeDir string, deleteDB bool) {
 	deregisterClaudeCodeHooks(homeDir)
 	deregisterHermesPlugin(homeDir)
 	deregisterCodexHooks(homeDir)
-	deregisterCodexMCP(homeDir) 
+	deregisterCodexMCP(homeDir)
 
 	dbPath := filepath.Join(homeDir, ".handshake", "sessions.db")
 	if deleteDB {
@@ -107,6 +107,7 @@ func registerClaudeCodeHooks(homeDir string) {
 
 	preCompactPath := filepath.Join(hooksDir, "handshake_pre_compact.py")
 	postCompactPath := filepath.Join(hooksDir, "handshake_post_compact.py")
+	stopPath := filepath.Join(hooksDir, "handshake_stop.py")
 
 	if err := os.WriteFile(preCompactPath, claudecode.PreCompactHook, 0755); err != nil {
 		fmt.Printf("✗ Claude Code hooks: could not write pre_compact hook: %v\n", err)
@@ -117,17 +118,22 @@ func registerClaudeCodeHooks(homeDir string) {
 		return
 	}
 
+	if err := os.WriteFile(stopPath, claudecode.StopHook, 0755); err != nil { // ← add
+		fmt.Printf("✗ Claude Code hooks: could not write stop hook: %v\n", err)
+		return
+	}
+
 	hooksConfigPath := filepath.Join(homeDir, ".claude", "hooks.json")
-	registerClaudeCodeHooksConfig(hooksConfigPath, preCompactPath, postCompactPath)
+	registerClaudeCodeHooksConfig(hooksConfigPath, preCompactPath, postCompactPath, stopPath)
 }
 
-func registerClaudeCodeHooksConfig(hooksConfigPath, preCompactPath, postCompactPath string) {
+func registerClaudeCodeHooksConfig(hooksConfigPath, preCompactPath, postCompactPath, stopPath string) {
 	var config map[string]any
 	data, err := os.ReadFile(hooksConfigPath)
 	if err == nil {
 		if err := json.Unmarshal(data, &config); err != nil {
 			fmt.Println("- Claude Code hooks: hooks.json is not valid JSON; add manually:")
-			printClaudeCodeHooksSnippet(preCompactPath, postCompactPath)
+			printClaudeCodeHooksSnippet(preCompactPath, postCompactPath, stopPath)
 			return
 		}
 	} else {
@@ -184,6 +190,16 @@ func registerClaudeCodeHooksConfig(hooksConfigPath, preCompactPath, postCompactP
 	hooks["PreCompact"] = append(preCompacts, preCompactEntry)
 	postCompacts, _ := hooks["PostCompact"].([]any)
 	hooks["PostCompact"] = append(postCompacts, postCompactEntry)
+	stops, _ := hooks["Stop"].([]any)
+	hooks["Stop"] = append(stops, map[string]any{
+		"hooks": []any{map[string]any{
+			"type":          "command",
+			"command":       fmt.Sprintf("python3 %s", stopPath),
+			"statusMessage": "Handshake: syncing session",
+			"timeout":       30,
+		}},
+	})
+
 	config["hooks"] = hooks
 
 	if _, err := os.Stat(hooksConfigPath); err == nil {
@@ -195,18 +211,19 @@ func registerClaudeCodeHooksConfig(hooksConfigPath, preCompactPath, postCompactP
 		return
 	}
 
-	fmt.Println("✓ Claude Code hooks: registered (PreCompact + PostCompact)")
+	fmt.Println("✓ Claude Code hooks: registered (PreCompact + PostCompact + Stop)")
 }
 
-func printClaudeCodeHooksSnippet(preCompactPath, postCompactPath string) {
-	fmt.Printf(`  Add to ~/.claude/hooks.json:
+func printClaudeCodeHooksSnippet(preCompactPath, postCompactPath, stopPath string) {
+    fmt.Printf(`  Add to ~/.claude/hooks.json:
   {
     "hooks": {
       "PreCompact": [{"matcher":"auto|manual","hooks":[{"type":"command","command":"python3 %s"}]}],
-      "PostCompact": [{"matcher":"auto|manual","hooks":[{"type":"command","command":"python3 %s"}]}]
+      "PostCompact": [{"matcher":"auto|manual","hooks":[{"type":"command","command":"python3 %s"}]}],
+      "Stop": [{"hooks":[{"type":"command","command":"python3 %s","timeout":30}]}]
     }
   }
-`, preCompactPath, postCompactPath)
+`, preCompactPath, postCompactPath, stopPath)
 }
 
 func deregisterClaudeCodeHooks(homeDir string) {
@@ -214,6 +231,7 @@ func deregisterClaudeCodeHooks(homeDir string) {
 	hooksDir := filepath.Join(homeDir, ".claude", "hooks")
 	os.Remove(filepath.Join(hooksDir, "handshake_pre_compact.py"))
 	os.Remove(filepath.Join(hooksDir, "handshake_post_compact.py"))
+	os.Remove(filepath.Join(hooksDir, "handshake_stop.py")) 
 
 	hooksConfigPath := filepath.Join(homeDir, ".claude", "hooks.json")
 	data, err := os.ReadFile(hooksConfigPath)
@@ -232,7 +250,7 @@ func deregisterClaudeCodeHooks(homeDir string) {
 		return
 	}
 
-	for _, key := range []string{"PreCompact", "PostCompact"} {
+	for _, key := range []string{"PreCompact", "PostCompact", "Stop"} {
 		entries, _ := hooks[key].([]any)
 		var filtered []any
 		for _, entry := range entries {
@@ -645,7 +663,7 @@ func registerCodexMCP(homeDir string) {
 
 // deregisterCodexMCP removes the Handshake MCP entry from ~/.codex/config.toml.
 func deregisterCodexMCP(homeDir string) {
-	//fmt.Println("DEBUG: running deregisterCodexMCP") 
+	//fmt.Println("DEBUG: running deregisterCodexMCP")
 	configPath := filepath.Join(homeDir, ".codex", "config.toml")
 
 	data, err := os.ReadFile(configPath)
@@ -818,7 +836,7 @@ func registerCodexHooksConfig(hooksConfigPath, preCompactPath, postCompactPath, 
 
 // deregisterCodexHooks removes hook scripts and entries from hooks.json.
 func deregisterCodexHooks(homeDir string) {
-	// fmt.Println("DEBUG: running deregisterCodexHooks") 
+	// fmt.Println("DEBUG: running deregisterCodexHooks")
 	hooksDir := filepath.Join(homeDir, ".codex", "hooks")
 	os.Remove(filepath.Join(hooksDir, "handshake_pre_compact.py"))
 	os.Remove(filepath.Join(hooksDir, "handshake_post_compact.py"))
