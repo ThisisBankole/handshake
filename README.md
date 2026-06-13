@@ -1,6 +1,6 @@
 # Handshake
 
-**Carry your sessions between AI agents.**
+
 
 Handshake is a local-first session portability daemon for AI coding agents.
 It runs silently in the background, keeping your sessions synced across
