@@ -11,7 +11,7 @@
 /handshake-test
 
 # Test scripts
-*.sh
+
 .test_e2e.sh/
 .test.sh/
 
