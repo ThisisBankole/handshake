@@ -8,7 +8,7 @@
 .handshake/
 .smoke-fixture/
 *.handshake.bak
-**.handshake-test
+/handshake-test
 
 # Test scripts
 *.sh
