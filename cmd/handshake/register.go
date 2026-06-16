@@ -215,7 +215,7 @@ func registerClaudeCodeHooksConfig(hooksConfigPath, preCompactPath, postCompactP
 }
 
 func printClaudeCodeHooksSnippet(preCompactPath, postCompactPath, stopPath string) {
-    fmt.Printf(`  Add to ~/.claude/hooks.json:
+	fmt.Printf(`  Add to ~/.claude/hooks.json:
   {
     "hooks": {
       "PreCompact": [{"matcher":"auto|manual","hooks":[{"type":"command","command":"python3 %s"}]}],
@@ -231,7 +231,7 @@ func deregisterClaudeCodeHooks(homeDir string) {
 	hooksDir := filepath.Join(homeDir, ".claude", "hooks")
 	os.Remove(filepath.Join(hooksDir, "handshake_pre_compact.py"))
 	os.Remove(filepath.Join(hooksDir, "handshake_post_compact.py"))
-	os.Remove(filepath.Join(hooksDir, "handshake_stop.py")) 
+	os.Remove(filepath.Join(hooksDir, "handshake_stop.py"))
 
 	hooksConfigPath := filepath.Join(homeDir, ".claude", "hooks.json")
 	data, err := os.ReadFile(hooksConfigPath)
@@ -324,11 +324,43 @@ func registerOpenCode(homeDir string) {
 		mcp = map[string]any{}
 	}
 	if _, exists := mcp["handshake"]; exists {
-		fmt.Println("✓ OpenCode: already registered")
+		// MCP already registered — but still ensure plugin key is present
+		pluginPath := filepath.Join(homeDir, ".config", "opencode", "plugins", "handshake.js")
+		existing, _ := config["plugin"].([]any)
+		alreadyRegistered := false
+		for _, p := range existing {
+			if p == pluginPath {
+				alreadyRegistered = true
+				break
+			}
+		}
+		if !alreadyRegistered {
+			config["plugin"] = append(existing, pluginPath)
+			backup(configPath)
+			writeJSON(configPath, config)
+			fmt.Println("✓ OpenCode: plugin path registered")
+		} else {
+			fmt.Println("✓ OpenCode: already registered")
+		}
 		return
 	}
 	mcp["handshake"] = entry
 	config["mcp"] = mcp
+
+	// Register the plugin file explicitly — directory auto-discovery
+	// is unreliable in some OpenCode versions
+	pluginPath := filepath.Join(homeDir, ".config", "opencode", "plugins", "handshake.js")
+	existing, _ := config["plugin"].([]any)
+	alreadyRegistered := false
+	for _, p := range existing {
+		if p == pluginPath {
+			alreadyRegistered = true
+			break
+		}
+	}
+	if !alreadyRegistered {
+		config["plugin"] = append(existing, pluginPath)
+	}
 
 	if err := backup(configPath); err != nil {
 		fmt.Printf("✗ OpenCode: could not back up config, not modifying it: %v\n", err)
@@ -376,6 +408,21 @@ func deregisterOpenCode(homeDir string) {
 		delete(config, "mcp")
 	} else {
 		config["mcp"] = mcp
+	}
+
+	pluginPath := filepath.Join(homeDir, ".config", "opencode", "plugins", "handshake.js")
+	if plugins, ok := config["plugin"].([]any); ok {
+		var filtered []any
+		for _, p := range plugins {
+			if p != pluginPath {
+				filtered = append(filtered, p)
+			}
+		}
+		if len(filtered) == 0 {
+			delete(config, "plugin")
+		} else {
+			config["plugin"] = filtered
+		}
 	}
 
 	if err := backup(configPath); err != nil {
