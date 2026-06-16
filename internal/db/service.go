@@ -20,6 +20,7 @@ type Session struct {
 	// Summary is optional handoff state written by the source agent at
 	// checkpoint time (current state, next steps, constraints).
 	Summary   string
+	GitState  string
 	CreatedAt int64
 	UpdatedAt int64
 }
@@ -64,15 +65,16 @@ func New(dbPath string) (*Database, error) {
 
 func (d *Database) initSchema() error {
 	schema := `CREATE TABLE IF NOT EXISTS sessions (
-		id          TEXT PRIMARY KEY,
-		title       TEXT NOT NULL,
-		agent       TEXT NOT NULL,
-		working_dir TEXT,
-		model       TEXT,
-		summary     TEXT NOT NULL DEFAULT '',
-		created_at  INTEGER NOT NULL,
-		updated_at  INTEGER NOT NULL
-	);
+    id          TEXT PRIMARY KEY,
+    title       TEXT NOT NULL,
+    agent       TEXT NOT NULL,
+    working_dir TEXT,
+    model       TEXT,
+    summary     TEXT NOT NULL DEFAULT '',
+    git_state   TEXT NOT NULL DEFAULT '',
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
 
 	CREATE TABLE IF NOT EXISTS messages (
 		id          TEXT PRIMARY KEY,
@@ -102,6 +104,12 @@ func (d *Database) initSchema() error {
 		return fmt.Errorf("failed to migrate sessions table: %w", err)
 	}
 
+	// Migration for databases created before git_state existed.
+	if _, err := d.db.Exec("ALTER TABLE sessions ADD COLUMN git_state TEXT NOT NULL DEFAULT ''"); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("failed to migrate sessions git_state: %w", err)
+	}
+
 	return nil
 }
 
@@ -117,16 +125,17 @@ func (d *Database) StoreSession(session *Session) error {
 	}
 
 	_, err := d.db.Exec(
-		`INSERT INTO sessions (id, title, agent, working_dir, model, summary, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(id) DO UPDATE SET
-		   title       = excluded.title,
-		   agent       = excluded.agent,
-		   working_dir = excluded.working_dir,
-		   model       = excluded.model,
-		   summary     = CASE WHEN excluded.summary != '' THEN excluded.summary ELSE sessions.summary END,
-		   updated_at  = excluded.updated_at`,
-		session.ID, session.Title, session.Agent, session.WorkingDir, session.Model, session.Summary, session.CreatedAt, session.UpdatedAt,
+		`INSERT INTO sessions (id, title, agent, working_dir, model, summary, git_state, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       title       = excluded.title,
+       agent       = excluded.agent,
+       working_dir = excluded.working_dir,
+       model       = excluded.model,
+       summary     = CASE WHEN excluded.summary != '' THEN excluded.summary ELSE sessions.summary END,
+       git_state   = CASE WHEN excluded.git_state != '' THEN excluded.git_state ELSE sessions.git_state END,
+       updated_at  = excluded.updated_at`,
+		session.ID, session.Title, session.Agent, session.WorkingDir, session.Model, session.Summary, session.GitState, session.CreatedAt, session.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to store session: %w", err)
@@ -158,12 +167,12 @@ func (d *Database) StoreMessage(message *Message) error {
 
 func (d *Database) GetSession(id string) (*Session, error) {
 	row := d.db.QueryRow(
-		"SELECT id, title, agent, working_dir, model, summary, created_at, updated_at FROM sessions WHERE id = ?",
+		"SELECT id, title, agent, working_dir, model, summary, git_state, created_at, updated_at FROM sessions WHERE id = ?",
 		id,
 	)
 
 	session := &Session{}
-	if err := row.Scan(&session.ID, &session.Title, &session.Agent, &session.WorkingDir, &session.Model, &session.Summary, &session.CreatedAt, &session.UpdatedAt); err != nil {
+	if err := row.Scan(&session.ID, &session.Title, &session.Agent, &session.WorkingDir, &session.Model, &session.Summary, &session.GitState, &session.CreatedAt, &session.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("session not found")
 		}
@@ -174,7 +183,7 @@ func (d *Database) GetSession(id string) (*Session, error) {
 }
 
 func (d *Database) ListSessions(agent string) ([]*Session, error) {
-	query := "SELECT id, title, agent, working_dir, model, summary, created_at, updated_at FROM sessions"
+	query := "SELECT id, title, agent, working_dir, model, summary, git_state, created_at, updated_at FROM sessions"
 	args := []any{}
 	if agent != "" {
 		query += " WHERE agent = ?"
@@ -191,7 +200,7 @@ func (d *Database) ListSessions(agent string) ([]*Session, error) {
 	var sessions []*Session
 	for rows.Next() {
 		session := &Session{}
-		if err := rows.Scan(&session.ID, &session.Title, &session.Agent, &session.WorkingDir, &session.Model, &session.Summary, &session.CreatedAt, &session.UpdatedAt); err != nil {
+		if err := rows.Scan(&session.ID, &session.Title, &session.Agent, &session.WorkingDir, &session.Model, &session.Summary, &session.GitState, &session.CreatedAt, &session.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("failed to scan session: %w", err)
 		}
 		sessions = append(sessions, session)

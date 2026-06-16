@@ -8,11 +8,14 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"handshake/internal/git"
 )
 
 // CodexAdapter reads sessions from Codex's native storage:
-//   ~/.codex/session_index.jsonl  — index of all sessions (id, title, updated_at)
-//   ~/.codex/sessions/YYYY/MM/DD/rollout-<datetime>-<id>.jsonl — transcripts
+//
+//	~/.codex/session_index.jsonl  — index of all sessions (id, title, updated_at)
+//	~/.codex/sessions/YYYY/MM/DD/rollout-<datetime>-<id>.jsonl — transcripts
 type CodexAdapter struct {
 	codexDir string
 }
@@ -34,16 +37,16 @@ type codexIndexEntry struct {
 // Codex uses a wrapper format: type + payload, not direct message objects.
 type codexRecord struct {
 	Timestamp string          `json:"timestamp"`
-	Type      string          `json:"type"`      // "response_item", "event_msg"
+	Type      string          `json:"type"` // "response_item", "event_msg"
 	Payload   json.RawMessage `json:"payload"`
 }
 
 // codexPayload is the inner payload of a response_item record.
 type codexPayload struct {
-	Type    string            `json:"type"`    // "message", "function_call", "reasoning"
-	Role    string            `json:"role"`    // "user", "assistant"
-	Name    string            `json:"name"`    // tool name for function_call
-	Content []codexContent    `json:"content"` // message content blocks
+	Type    string         `json:"type"`    // "message", "function_call", "reasoning"
+	Role    string         `json:"role"`    // "user", "assistant"
+	Name    string         `json:"name"`    // tool name for function_call
+	Content []codexContent `json:"content"` // message content blocks
 }
 
 // codexContent is one block inside a message's content array.
@@ -152,6 +155,33 @@ func (a *CodexAdapter) ReadSession(sessionID string) (*SessionData, error) {
 		}
 
 		switch payload.Type {
+
+		case "session_meta":
+			var meta struct {
+				ID  string `json:"id"`
+				CWD string `json:"cwd"`
+				Git *struct {
+					CommitHash string `json:"commit_hash"`
+					Branch     string `json:"branch"`
+				} `json:"git"`
+			}
+			if err := json.Unmarshal(rec.Payload, &meta); err == nil {
+				if meta.CWD != "" && session.WorkingDir == "" {
+					session.WorkingDir = meta.CWD
+				}
+				if meta.Git != nil && session.GitState == "" {
+					// Use Codex's own git capture rather than running git ourselves
+					state := git.State{
+						Commit:     meta.Git.CommitHash,
+						Branch:     meta.Git.Branch,
+						CapturedAt: session.CreatedAt,
+					}
+					encoded, _ := json.Marshal(state)
+					session.GitState = string(encoded)
+				}
+			}
+			continue
+
 		case "message":
 			// Extract text from content blocks
 			content := flattenCodexContent(payload.Content)
@@ -275,10 +305,10 @@ func flattenCodexContent(blocks []codexContent) string {
 		if (b.Type == "input_text" || b.Type == "output_text") && b.Text != "" {
 			text := strings.TrimSpace(b.Text)
 			// Strip Codex system XML injected into user messages
-            if strings.HasPrefix(text, "<environment_context>") ||
-                strings.HasPrefix(text, "<permissions") {
-                continue
-            }
+			if strings.HasPrefix(text, "<environment_context>") ||
+				strings.HasPrefix(text, "<permissions") {
+				continue
+			}
 			parts = append(parts, text)
 		}
 	}

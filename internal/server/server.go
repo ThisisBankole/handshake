@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"handshake/internal/adapters"
 	"handshake/internal/db"
 	"handshake/internal/engine"
+	"handshake/internal/git"
 )
 
 // Server bundles the canonical database, the MCP tool surface, and the plain
@@ -140,6 +142,18 @@ func (s *Server) handleCheckpointSession(request mcp.CallToolRequest) (*mcp.Call
 		sessionData.Title = title
 	}
 	sessionData.Summary = summary
+
+	// Capture git state from the session's working directory.
+	// Silently skipped if the directory has no git repo or git isn't installed.
+	if sessionData.WorkingDir != "" {
+		if state, err := git.CaptureState(sessionData.WorkingDir); err == nil && state != nil {
+			encoded, jsonErr := json.Marshal(state)
+			if jsonErr == nil {
+				sessionData.GitState = string(encoded)
+			}
+		}
+	}
+
 	if err := adapters.Ingest(s.db, sessionData); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
