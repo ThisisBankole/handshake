@@ -75,7 +75,7 @@ const (
 
 	goalMaxChars  = 600
 	stateMaxChars = 1200
-	clipMaxChars  = 900 
+	clipMaxChars  = 900
 )
 
 // excerptMessage is a conversation message after tool-noise filtering.

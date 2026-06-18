@@ -16,6 +16,45 @@ const briefPending = new Map()
 const SYNC_DEBOUNCE_MS = 1500   // wait 1.5s after last update before syncing
 const BRIEF_DEBOUNCE_MS = 5000  // wait 5s after idle before regenerating brief
 
+const asSeconds = (value) => {
+  if (!value) return Math.floor(Date.now() / 1000)
+  return Math.floor(value > 10_000_000_000 ? value / 1000 : value)
+}
+
+const firstString = (...values) => values.find((v) => typeof v === "string" && v.length > 0) ?? ""
+
+const collectSessionIDs = (value, out = []) => {
+  if (!value || typeof value !== "object") return out
+  for (const [key, nested] of Object.entries(value)) {
+    if (typeof nested === "string") {
+      const normalized = key.toLowerCase().replace(/[_-]/g, "")
+      if (normalized === "sessionid" || normalized === "id") out.push(nested)
+      continue
+    }
+    collectSessionIDs(nested, out)
+  }
+  return out
+}
+
+const sessionIDFromEvent = (event) => {
+  const props = event.properties ?? {}
+  const candidates = [
+    props.sessionID,
+    props.sessionId,
+    props.session_id,
+    props.session?.id,
+    props.session?.sessionID,
+    props.session?.sessionId,
+    props.info?.sessionID,
+    props.info?.sessionId,
+    props.info?.session_id,
+    ...collectSessionIDs(props),
+    props.info?.id,
+  ].filter((id) => typeof id === "string" && id.length > 0)
+
+  return candidates.find((id) => id.startsWith("ses_")) ?? candidates[0] ?? ""
+}
+
 // ── Sync messages to Handshake ────────────────────────────────────────────────
 
 const syncSession = async (sessionID, client) => {
@@ -53,12 +92,12 @@ const syncSession = async (sessionID, client) => {
       body: JSON.stringify({
         agent: "opencode",
         session: {
-          id: info.id,
+          id: sessionID,
           title: info.title ?? "",
-          working_dir: info.directory ?? "",
-          model: info.model ?? "",
-          created_at: Math.floor((info.time?.created ?? Date.now()) / 1000),
-          updated_at: Math.floor((info.time?.updated ?? Date.now()) / 1000),
+          working_dir: firstString(info.directory, info.cwd, info.path, info.workspace),
+          model: firstString(info.model, info.modelID, info.modelId),
+          created_at: asSeconds(info.time?.created ?? info.time_created ?? info.created_at),
+          updated_at: asSeconds(info.time?.updated ?? info.time_updated ?? info.updated_at),
         },
         messages,
       }),
@@ -90,7 +129,7 @@ export const HandshakeSync = async ({ client }) => {
     // 1. Sync messages in real time on every session update.
     event: async ({ event }) => {
       if (event.type === "session.updated") {
-        const id = event.properties?.info?.id
+        const id = sessionIDFromEvent(event)
         if (!id) return
         clearTimeout(syncPending.get(id))
         syncPending.set(id, setTimeout(() => syncSession(id, client), SYNC_DEBOUNCE_MS))
@@ -99,7 +138,7 @@ export const HandshakeSync = async ({ client }) => {
 
       // 2. Regenerate brief when session goes idle (agent finished responding).
       if (event.type === "session.idle") {
-        const id = event.properties?.info?.id
+        const id = sessionIDFromEvent(event)
         if (!id) return
         clearTimeout(briefPending.get("brief:" + id))
         briefPending.set("brief:" + id, setTimeout(() => generateBrief(id), BRIEF_DEBOUNCE_MS))
@@ -108,7 +147,7 @@ export const HandshakeSync = async ({ client }) => {
 
       // 3. Capture compaction summary when OpenCode finishes compacting.
       if (event.type === "session.compacted") {
-        const id = event.properties?.info?.id
+        const id = sessionIDFromEvent(event)
         const summary = event.properties?.summary ?? event.properties?.info?.summary ?? ""
         if (!id) return
 

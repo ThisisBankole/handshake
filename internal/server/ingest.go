@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"handshake/internal/adapters"
+	"handshake/internal/git"
 )
 
 // ingestPayload is the JSON body POSTed to /ingest, primarily by the bundled
@@ -18,6 +19,7 @@ type ingestPayload struct {
 		WorkingDir string `json:"working_dir"`
 		Model      string `json:"model"`
 		Summary    string `json:"summary"`
+		GitState   string `json:"git_state"`
 		CreatedAt  int64  `json:"created_at"`
 		UpdatedAt  int64  `json:"updated_at"`
 	} `json:"session"`
@@ -59,6 +61,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		WorkingDir: payload.Session.WorkingDir,
 		Model:      payload.Session.Model,
 		Summary:    payload.Session.Summary,
+		GitState:   payload.Session.GitState,
 		CreatedAt:  payload.Session.CreatedAt,
 		UpdatedAt:  payload.Session.UpdatedAt,
 	}
@@ -74,6 +77,8 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	s.enrichIngestedSession(session)
+
 	if err := adapters.Ingest(s.db, session); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -81,6 +86,43 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"ok":true,"session_id":%q,"messages":%d}`+"\n", session.ID, len(session.Messages))
+}
+
+func (s *Server) enrichIngestedSession(session *adapters.SessionData) {
+	if session.Agent == "opencode" {
+		if native, err := s.readNativeSession(session.Agent, session.ID); err == nil {
+			if session.Title == "" {
+				session.Title = native.Title
+			}
+			if session.WorkingDir == "" {
+				session.WorkingDir = native.WorkingDir
+			}
+			if session.Model == "" {
+				session.Model = native.Model
+			}
+			if session.CreatedAt == 0 {
+				session.CreatedAt = native.CreatedAt
+			}
+			if session.UpdatedAt == 0 {
+				session.UpdatedAt = native.UpdatedAt
+			}
+			if len(session.Messages) == 0 {
+				session.Messages = native.Messages
+			}
+		}
+	}
+
+	if session.GitState != "" || session.WorkingDir == "" {
+		return
+	}
+	state, err := git.CaptureState(session.WorkingDir)
+	if err != nil || state == nil {
+		return
+	}
+	encoded, err := json.Marshal(state)
+	if err == nil {
+		session.GitState = string(encoded)
+	}
 }
 
 // handleGenerateBrief regenerates and caches the brief for a session.

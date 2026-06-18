@@ -15,7 +15,7 @@ type SessionData struct {
 	WorkingDir string
 	Model      string
 	Summary    string
-	GitState   string  // optional handoff state written by the source agent
+	GitState   string // optional handoff state written by the source agent
 	Messages   []MessageData
 	CreatedAt  int64 // unix seconds
 	UpdatedAt  int64 // unix seconds

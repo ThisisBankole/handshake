@@ -5,11 +5,11 @@ import (
 	"os"
 	"path/filepath"
 
+	"handshake/internal/adapters"
 	"handshake/internal/db"
 	"handshake/internal/engine"
 	"handshake/internal/server"
 	"handshake/plugins/opencode"
-	"handshake/internal/adapters"
 )
 
 // version is stamped by GoReleaser at build time (-X main.version=...).
