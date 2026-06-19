@@ -15,6 +15,7 @@ type SessionData struct {
 	WorkingDir string
 	Model      string
 	Summary    string
+	Decisions  string // newline-separated settled decisions, written by source agent at checkpoint
 	GitState   string // optional handoff state written by the source agent
 	Messages   []MessageData
 	CreatedAt  int64 // unix seconds
@@ -44,6 +45,7 @@ func Ingest(database *db.Database, session *SessionData) error {
 		WorkingDir: session.WorkingDir,
 		Model:      session.Model,
 		Summary:    session.Summary,
+		Decisions:  session.Decisions,
 		GitState:   session.GitState,
 		CreatedAt:  session.CreatedAt,
 		UpdatedAt:  session.UpdatedAt,

@@ -19,7 +19,10 @@ type Session struct {
 	Model      string
 	// Summary is optional handoff state written by the source agent at
 	// checkpoint time (current state, next steps, constraints).
-	Summary   string
+	Summary string
+	// Decisions is a newline-separated list of key decisions made during the
+	// session, written by the source agent at checkpoint time.
+	Decisions string
 	GitState  string
 	CreatedAt int64
 	UpdatedAt int64
@@ -71,6 +74,7 @@ func (d *Database) initSchema() error {
     working_dir TEXT,
     model       TEXT,
     summary     TEXT NOT NULL DEFAULT '',
+    decisions   TEXT NOT NULL DEFAULT '',
     git_state   TEXT NOT NULL DEFAULT '',
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL
@@ -92,7 +96,26 @@ func (d *Database) initSchema() error {
 		content       TEXT NOT NULL,
 		generated_at  INTEGER NOT NULL,
 		FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-	);`
+	);
+
+	CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT);
+
+	CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+		content,
+		content='messages',
+		content_rowid='rowid'
+	);
+
+	CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+		INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+	END;
+	CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+		INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+	END;
+	CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+		INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+		INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+	END;`
 
 	if _, err := d.db.Exec(schema); err != nil {
 		return fmt.Errorf("failed to execute schema: %w", err)
@@ -110,7 +133,92 @@ func (d *Database) initSchema() error {
 		return fmt.Errorf("failed to migrate sessions git_state: %w", err)
 	}
 
+	// Migration for databases created before decisions existed.
+	if _, err := d.db.Exec("ALTER TABLE sessions ADD COLUMN decisions TEXT NOT NULL DEFAULT ''"); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("failed to migrate sessions decisions: %w", err)
+	}
+
+	// Populate FTS index from messages that existed before the FTS table was added.
+	// Triggers handle all inserts going forward; this runs exactly once.
+	var ftsBuilt string
+	d.db.QueryRow("SELECT value FROM schema_meta WHERE key = 'fts_built'").Scan(&ftsBuilt)
+	if ftsBuilt == "" {
+		if _, err := d.db.Exec("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')"); err != nil {
+			return fmt.Errorf("failed to build FTS index: %w", err)
+		}
+		if _, err := d.db.Exec("INSERT OR REPLACE INTO schema_meta VALUES ('fts_built', '1')"); err != nil {
+			return fmt.Errorf("failed to record FTS migration: %w", err)
+		}
+	}
+
 	return nil
+}
+
+// SearchResult is a single message match returned from a full-text search.
+type SearchResult struct {
+	SessionID    string
+	SessionTitle string
+	SessionAgent string
+	Role         string
+	Content      string
+	CreatedAt    int64
+}
+
+// SearchMessages searches within a single session's messages using FTS5.
+func (d *Database) SearchMessages(sessionID, query string, limit int) ([]*SearchResult, error) {
+	rows, err := d.db.Query(`
+		SELECT m.session_id, s.title, s.agent, m.role, m.content, m.created_at
+		FROM messages m
+		JOIN messages_fts ON messages_fts.rowid = m.rowid
+		JOIN sessions s ON m.session_id = s.id
+		WHERE messages_fts MATCH ? AND m.session_id = ?
+		ORDER BY messages_fts.rank
+		LIMIT ?`,
+		query, sessionID, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("search failed: %w", err)
+	}
+	defer rows.Close()
+	return scanSearchResults(rows)
+}
+
+// SearchAllMessages searches across all sessions' messages using FTS5.
+// If agent is non-empty, results are filtered to that agent.
+func (d *Database) SearchAllMessages(query string, limit int, agent string) ([]*SearchResult, error) {
+	q := `
+		SELECT m.session_id, s.title, s.agent, m.role, m.content, m.created_at
+		FROM messages m
+		JOIN messages_fts ON messages_fts.rowid = m.rowid
+		JOIN sessions s ON m.session_id = s.id
+		WHERE messages_fts MATCH ?`
+	args := []any{query}
+	if agent != "" {
+		q += " AND s.agent = ?"
+		args = append(args, agent)
+	}
+	q += " ORDER BY messages_fts.rank LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := d.db.Query(q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("search failed: %w", err)
+	}
+	defer rows.Close()
+	return scanSearchResults(rows)
+}
+
+func scanSearchResults(rows *sql.Rows) ([]*SearchResult, error) {
+	var results []*SearchResult
+	for rows.Next() {
+		r := &SearchResult{}
+		if err := rows.Scan(&r.SessionID, &r.SessionTitle, &r.SessionAgent, &r.Role, &r.Content, &r.CreatedAt); err != nil {
+			return nil, fmt.Errorf("failed to scan search result: %w", err)
+		}
+		results = append(results, r)
+	}
+	return results, rows.Err()
 }
 
 // StoreSession inserts or updates a session. created_at is preserved on
@@ -125,17 +233,18 @@ func (d *Database) StoreSession(session *Session) error {
 	}
 
 	_, err := d.db.Exec(
-		`INSERT INTO sessions (id, title, agent, working_dir, model, summary, git_state, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO sessions (id, title, agent, working_dir, model, summary, decisions, git_state, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        title       = excluded.title,
        agent       = excluded.agent,
        working_dir = excluded.working_dir,
        model       = excluded.model,
        summary     = CASE WHEN excluded.summary != '' THEN excluded.summary ELSE sessions.summary END,
+       decisions   = CASE WHEN excluded.decisions != '' THEN excluded.decisions ELSE sessions.decisions END,
        git_state   = CASE WHEN excluded.git_state != '' THEN excluded.git_state ELSE sessions.git_state END,
        updated_at  = excluded.updated_at`,
-		session.ID, session.Title, session.Agent, session.WorkingDir, session.Model, session.Summary, session.GitState, session.CreatedAt, session.UpdatedAt,
+		session.ID, session.Title, session.Agent, session.WorkingDir, session.Model, session.Summary, session.Decisions, session.GitState, session.CreatedAt, session.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to store session: %w", err)
@@ -167,12 +276,12 @@ func (d *Database) StoreMessage(message *Message) error {
 
 func (d *Database) GetSession(id string) (*Session, error) {
 	row := d.db.QueryRow(
-		"SELECT id, title, agent, working_dir, model, summary, git_state, created_at, updated_at FROM sessions WHERE id = ?",
+		"SELECT id, title, agent, working_dir, model, summary, decisions, git_state, created_at, updated_at FROM sessions WHERE id = ?",
 		id,
 	)
 
 	session := &Session{}
-	if err := row.Scan(&session.ID, &session.Title, &session.Agent, &session.WorkingDir, &session.Model, &session.Summary, &session.GitState, &session.CreatedAt, &session.UpdatedAt); err != nil {
+	if err := row.Scan(&session.ID, &session.Title, &session.Agent, &session.WorkingDir, &session.Model, &session.Summary, &session.Decisions, &session.GitState, &session.CreatedAt, &session.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("session not found")
 		}
@@ -183,7 +292,7 @@ func (d *Database) GetSession(id string) (*Session, error) {
 }
 
 func (d *Database) ListSessions(agent string) ([]*Session, error) {
-	query := "SELECT id, title, agent, working_dir, model, summary, git_state, created_at, updated_at FROM sessions"
+	query := "SELECT id, title, agent, working_dir, model, summary, decisions, git_state, created_at, updated_at FROM sessions"
 	args := []any{}
 	if agent != "" {
 		query += " WHERE agent = ?"
@@ -200,7 +309,7 @@ func (d *Database) ListSessions(agent string) ([]*Session, error) {
 	var sessions []*Session
 	for rows.Next() {
 		session := &Session{}
-		if err := rows.Scan(&session.ID, &session.Title, &session.Agent, &session.WorkingDir, &session.Model, &session.Summary, &session.GitState, &session.CreatedAt, &session.UpdatedAt); err != nil {
+		if err := rows.Scan(&session.ID, &session.Title, &session.Agent, &session.WorkingDir, &session.Model, &session.Summary, &session.Decisions, &session.GitState, &session.CreatedAt, &session.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("failed to scan session: %w", err)
 		}
 		sessions = append(sessions, session)

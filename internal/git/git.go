@@ -4,6 +4,7 @@
 package git
 
 import (
+	"fmt"
 	"os/exec"
 	"strings"
 	"time"
@@ -47,9 +48,10 @@ func CaptureState(workingDir string) (*State, error) {
 		state.Message = out
 	}
 
-	// Working tree status — lists modified, added, deleted files
-	// Empty string means clean working tree
-	if out, err := output(workingDir, "status", "--short"); err == nil {
+	// Working tree status — lists modified, added, deleted files.
+	// Use rawOutput to preserve per-line leading spaces (XY columns in the format).
+	// Empty string means clean working tree.
+	if out, err := rawOutput(workingDir, "status", "--short"); err == nil {
 		state.Status = out
 	}
 
@@ -105,12 +107,124 @@ func ChangedFiles(checkpointStatus, currentStatus string) []string {
 	return changed
 }
 
+// DriftReport summarises the difference between a checkpointed git state and
+// the current state of the repository.
+type DriftReport struct {
+	CheckpointCommit string
+	CheckpointBranch string
+	CurrentCommit    string
+	CurrentBranch    string
+	CommitsAhead     int      // commits added since checkpoint; -1 if unknown
+	ChangedFiles     []string // "X path" lines from git status diff
+}
+
+// CompareStates computes drift between a checkpointed state and the current state.
+func CompareStates(workingDir string, checkpoint, current *State) DriftReport {
+	return DriftReport{
+		CheckpointCommit: shortHash(checkpoint.Commit),
+		CheckpointBranch: checkpoint.Branch,
+		CurrentCommit:    shortHash(current.Commit),
+		CurrentBranch:    current.Branch,
+		CommitsAhead:     CommitsBehind(workingDir, checkpoint.Commit, current.Commit),
+		ChangedFiles:     ChangedFiles(checkpoint.Status, current.Status),
+	}
+}
+
+// BuildRestorePacket formats a human-readable drift packet for display before
+// a session is restored. Returns an empty string when checkpoint is nil or
+// the working directory has no git repo.
+func BuildRestorePacket(title, agent string, updatedAt int64, workingDir string, checkpoint *State, summary, decisions string) string {
+	if checkpoint == nil {
+		return ""
+	}
+	current, err := CaptureState(workingDir)
+	if err != nil || current == nil {
+		return ""
+	}
+
+	drift := CompareStates(workingDir, checkpoint, current)
+
+	var b strings.Builder
+	sep := strings.Repeat("─", 36)
+
+	fmt.Fprintf(&b, "Restoring: %s\n", title)
+	b.WriteString(sep + "\n")
+	fmt.Fprintf(&b, "Source:       %s\n", agent)
+	fmt.Fprintf(&b, "Checkpointed: %s\n", relativeAge(updatedAt))
+	b.WriteString("\n")
+	fmt.Fprintf(&b, "Git at checkpoint:  %s (%s)\n", drift.CheckpointCommit, drift.CheckpointBranch)
+
+	aheadNote := ""
+	switch drift.CommitsAhead {
+	case 0:
+		// no note
+	case -1:
+		aheadNote = " (commit delta unknown)"
+	default:
+		s := "s"
+		if drift.CommitsAhead == 1 {
+			s = ""
+		}
+		aheadNote = fmt.Sprintf(" — %d commit%s ahead", drift.CommitsAhead, s)
+	}
+	fmt.Fprintf(&b, "Git now:            %s (%s)%s\n", drift.CurrentCommit, drift.CurrentBranch, aheadNote)
+
+	if len(drift.ChangedFiles) > 0 {
+		b.WriteString("\nFiles changed since checkpoint:\n")
+		for _, f := range drift.ChangedFiles {
+			fmt.Fprintf(&b, "  %s\n", f)
+		}
+	}
+
+	if decisions != "" {
+		b.WriteString("\nDecisions carried forward:\n")
+		for _, line := range strings.Split(strings.TrimSpace(decisions), "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				fmt.Fprintf(&b, "  - %s\n", line)
+			}
+		}
+	}
+
+	if summary != "" {
+		b.WriteString("\nCheckpoint summary:\n")
+		for _, line := range strings.Split(strings.TrimSpace(summary), "\n") {
+			fmt.Fprintf(&b, "  %s\n", line)
+		}
+	}
+
+	b.WriteString(sep)
+	return b.String()
+}
+
+func relativeAge(unix int64) string {
+	d := time.Since(time.Unix(unix, 0))
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
+}
+
+func shortHash(h string) string {
+	if len(h) >= 7 {
+		return h[:7]
+	}
+	return h
+}
+
 // parseStatusLines turns git status --short output into a map of path → flag.
-// Each line looks like "M  src/auth/middleware.go" or "?? newfile.go"
+// git status --short format: XY<space>filename (X=staged, Y=unstaged, always 2 status
+// chars then a space). TrimSpace must NOT be applied before slicing or it shifts columns.
 func parseStatusLines(status string) map[string]string {
 	result := make(map[string]string)
 	for _, line := range strings.Split(status, "\n") {
-		line = strings.TrimSpace(line)
+		line = strings.TrimRight(line, "\r\n")
 		if len(line) < 4 {
 			continue
 		}
@@ -137,4 +251,16 @@ func output(workingDir string, args ...string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// rawOutput is like output but preserves leading whitespace on each line,
+// only stripping the trailing newline. Used for multi-line outputs like
+// git status --short where per-line column positions are meaningful.
+func rawOutput(workingDir string, args ...string) (string, error) {
+	cmd := exec.Command("git", append([]string{"-C", workingDir}, args...)...)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(string(out), "\r\n"), nil
 }

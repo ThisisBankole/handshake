@@ -124,6 +124,17 @@ func buildBrief(session *db.Session, messages []*db.Message) string {
 		b.WriteString(clip(last, stateMaxChars) + "\n\n")
 	}
 
+	if session.Decisions != "" {
+		b.WriteString("## Settled Decisions\n\n")
+		for _, line := range strings.Split(strings.TrimSpace(session.Decisions), "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				b.WriteString("- " + line + "\n")
+			}
+		}
+		b.WriteString("\n")
+	}
+
 	// Select which messages to show and write the conversation section.
 	if fullMode {
 		// ≤50 substantive messages — show everything with no clipping.

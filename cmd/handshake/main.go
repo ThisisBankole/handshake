@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"handshake/internal/adapters"
 	"handshake/internal/db"
 	"handshake/internal/engine"
+	"handshake/internal/git"
 	"handshake/internal/server"
 	"handshake/plugins/opencode"
 )
@@ -157,28 +161,67 @@ func restoreCmd(dbPath, title string) {
 	database := openDB(dbPath)
 	defer database.Close()
 
+	session := findSessionCLI(database, title)
+
+	// If the session has stored git state, show the restore packet and prompt.
+	if session.GitState != "" {
+		var checkpoint git.State
+		if err := json.Unmarshal([]byte(session.GitState), &checkpoint); err == nil {
+			workingDir := session.WorkingDir
+			if workingDir == "" {
+				workingDir, _ = os.UserHomeDir()
+			}
+			packet := git.BuildRestorePacket(session.Title, session.Agent, session.UpdatedAt, workingDir, &checkpoint, session.Summary, session.Decisions)
+			if packet != "" {
+				fmt.Println(packet)
+				fmt.Print("\nInject this context? [Y/n] ")
+				scanner := bufio.NewScanner(os.Stdin)
+				scanner.Scan()
+				answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
+				if answer == "n" || answer == "no" {
+					fmt.Println("Restore cancelled.")
+					return
+				}
+				fmt.Println()
+			}
+		}
+	}
+
+	brief, err := engine.NewBriefGenerator(database).GenerateBrief(session.ID)
+	if err != nil {
+		fmt.Printf("Failed to generate brief: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(brief.Brief)
+}
+
+// findSessionCLI fuzzy-matches a title against checkpointed sessions:
+// exact match first, then substring. Exits if no match found.
+func findSessionCLI(database *db.Database, title string) *db.Session {
 	sessions, err := database.ListSessions("")
 	if err != nil {
 		fmt.Printf("Failed to list sessions: %v\n", err)
 		os.Exit(1)
 	}
 
-	var sessionID string
-	for _, session := range sessions {
-		if session.Title == title {
-			sessionID = session.ID
-			break
+	q := strings.ToLower(strings.TrimSpace(title))
+	var submatches []*db.Session
+	for _, s := range sessions {
+		t := strings.ToLower(s.Title)
+		if t == q {
+			return s // exact match wins immediately
+		}
+		if strings.Contains(t, q) {
+			submatches = append(submatches, s)
 		}
 	}
-	if sessionID == "" {
-		fmt.Printf("Session not found: %s\n", title)
-		os.Exit(1)
+	if len(submatches) > 0 {
+		if len(submatches) > 1 {
+			fmt.Printf("Multiple sessions match %q — using most recent: %s\n\n", title, submatches[0].Title)
+		}
+		return submatches[0]
 	}
-
-	brief, err := engine.NewBriefGenerator(database).GenerateBrief(sessionID)
-	if err != nil {
-		fmt.Printf("Failed to generate brief: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println(brief.Brief)
+	fmt.Printf("Session not found: %s\n", title)
+	os.Exit(1)
+	return nil
 }
