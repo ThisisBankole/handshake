@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"handshake/internal/adapters"
@@ -74,7 +76,7 @@ func usage() {
 	fmt.Println("Commands:")
 	fmt.Println("  setup              Guided setup — registers with agents, installs service (default)")
 	fmt.Println("  init               Non-interactive setup — create database and register with agents")
-	fmt.Println("  serve              Start the MCP + ingest server on " + listenAddr)
+	fmt.Println("  serve              Start the MCP + ingest server (default: " + listenAddr + ")")
 	fmt.Println("  list               List checkpointed sessions")
 	fmt.Println("  restore <title>    Print the handoff brief for a session")
 	fmt.Println("  install-service    Start the daemon on login (launchd/systemd)")
@@ -82,6 +84,35 @@ func usage() {
 	fmt.Println("  uninstall          Remove Handshake from all agents and clean up")
 	fmt.Println("  version            Print the version")
 	fmt.Println("  help               Show this message")
+	fmt.Println()
+	fmt.Println("Environment variables:")
+	fmt.Println("  HANDSHAKE_ADDR     Daemon listen address (e.g. localhost:8766)")
+	fmt.Println("  HANDSHAKE_URL      MCP endpoint URL registered with agents")
+	fmt.Println("                     (e.g. http://localhost:8766/mcp)")
+	fmt.Println("                     Set both when another tool already uses port 8765.")
+}
+
+// findFreePort returns addr if the port is available, otherwise increments the
+// port number until a free one is found (up to +100). Returns addr unchanged
+// on any parse error.
+func findFreePort(addr string) string {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return addr
+	}
+	for p := port; p < port+100; p++ {
+		candidate := net.JoinHostPort(host, strconv.Itoa(p))
+		ln, err := net.Listen("tcp", candidate)
+		if err == nil {
+			ln.Close()
+			return candidate
+		}
+	}
+	return addr
 }
 
 func openDB(dbPath string) *db.Database {
@@ -129,7 +160,17 @@ func serveCmd(homeDir, dbPath string) {
 	fmt.Printf("  MCP endpoint:    http://%s/mcp\n", addr)
 	fmt.Printf("  Ingest endpoint: http://%s/ingest\n", addr)
 	if err := srv.Serve(addr); err != nil {
-		fmt.Printf("Server error: %v\n", err)
+		if strings.Contains(err.Error(), "address already in use") {
+			fmt.Printf("Port conflict: %s is already in use.\n", addr)
+			fmt.Println("Another process (possibly another MCP tool) is listening on this port.")
+			fmt.Println()
+			fmt.Println("Fix: pick a free port and re-run setup so the MCP URL is updated:")
+			fmt.Println()
+			fmt.Printf("  HANDSHAKE_ADDR=localhost:8766 handshake serve\n")
+			fmt.Printf("  HANDSHAKE_URL=http://localhost:8766/mcp handshake setup\n")
+		} else {
+			fmt.Printf("Server error: %v\n", err)
+		}
 		os.Exit(1)
 	}
 }

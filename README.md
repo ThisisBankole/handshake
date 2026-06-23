@@ -87,6 +87,45 @@ checkpoint this session
 - Hermes
 - Codex
 
+## Configuration
+
+Handshake defaults to `localhost:8765`. If that port is already in use,
+`handshake setup` detects the conflict automatically and picks the next
+free port — no manual action needed. The setup wizard will tell you which
+port was chosen and register all agents with the correct URL.
+
+**To pin a specific port** (optional), set these before running `handshake setup`:
+
+| Variable | Purpose |
+|---|---|
+| `HANDSHAKE_ADDR` | Address the daemon binds to (e.g. `localhost:8766`) |
+| `HANDSHAKE_URL` | MCP endpoint registered with agents (e.g. `http://localhost:8766/mcp`) |
+
+```bash
+export HANDSHAKE_ADDR=localhost:8766
+export HANDSHAKE_URL=http://localhost:8766/mcp
+handshake setup
+```
+
+**Changing the port on an existing service install (macOS):**
+Add an `EnvironmentVariables` block to the launchd plist at
+`~/Library/LaunchAgents/com.handshake.daemon.plist`, then re-run `handshake setup`
+to update agent registrations:
+
+```xml
+<key>EnvironmentVariables</key>
+<dict>
+  <key>HANDSHAKE_ADDR</key><string>localhost:8766</string>
+  <key>HANDSHAKE_URL</key><string>http://localhost:8766/mcp</string>
+</dict>
+```
+
+Then reload:
+```bash
+launchctl unload ~/Library/LaunchAgents/com.handshake.daemon.plist
+launchctl load  ~/Library/LaunchAgents/com.handshake.daemon.plist
+```
+
 ## Uninstall
 
 ```bash

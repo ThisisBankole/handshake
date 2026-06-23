@@ -102,7 +102,7 @@ def main():
                 "mcp-session-id": mcp_session_id
             }
         )
-        urllib.request.urlopen(checkpoint_req, timeout=10)
+        urllib.request.urlopen(checkpoint_req, timeout=25)
 
     except (urllib.error.URLError, OSError):
         # Handshake daemon not running — don't block compaction

@@ -154,7 +154,7 @@ def _generate_brief(session_id: str) -> None:
             data=payload,
             headers={"Content-Type": "application/json"},
         )
-        urllib.request.urlopen(req, timeout=10)
+        urllib.request.urlopen(req, timeout=25)
     except (urllib.error.URLError, OSError):
         pass
 

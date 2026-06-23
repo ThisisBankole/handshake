@@ -46,6 +46,9 @@ func deregisterAgents(homeDir string, deleteDB bool) {
 }
 
 func mcpURL() string {
+	if env := os.Getenv("HANDSHAKE_URL"); env != "" {
+		return env
+	}
 	return "http://" + listenAddr + "/mcp"
 }
 

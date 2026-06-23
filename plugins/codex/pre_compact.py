@@ -75,7 +75,7 @@ def mcp_checkpoint(session_id: str, trigger: str) -> None:
         headers={"Content-Type": "application/json",
                  "Accept": "application/json, text/event-stream",
                  "mcp-session-id": sid}
-    ), timeout=10)
+    ), timeout=25)
 
 
 def main():

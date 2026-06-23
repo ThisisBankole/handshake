@@ -3,10 +3,12 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"handshake/plugins/opencode"
 )
@@ -18,11 +20,39 @@ func setupCmd(homeDir, dbPath string) {
 
 	fmt.Println("╔─────────────────────────────────────────────╗")
 	fmt.Println("│  Welcome to Handshake                       │")
-	fmt.Println("│  Session portability for AI agents   │")
+	fmt.Println("│  Session portability for AI agents          │")
 	fmt.Println("╚─────────────────────────────────────────────╝")
 	fmt.Println()
 	fmt.Println("This will set up Handshake on your machine in three steps.")
 	fmt.Println()
+
+	// ── Port resolution ────────────────────────────────────────────────────
+	// Respect an explicit HANDSHAKE_ADDR if the user pre-set it; otherwise
+	// scan for the first free port starting at the default.
+	resolvedAddr := listenAddr
+	fmt.Println("  Checking port availability...")
+	if explicit := os.Getenv("HANDSHAKE_ADDR"); explicit != "" {
+		resolvedAddr = explicit
+		fmt.Printf("  ✓ Using pre-configured address: %s\n", resolvedAddr)
+		fmt.Println()
+		if os.Getenv("HANDSHAKE_URL") == "" {
+			os.Setenv("HANDSHAKE_URL", "http://"+resolvedAddr+"/mcp")
+		}
+	} else {
+		resolvedAddr = findFreePort(listenAddr)
+		if resolvedAddr != listenAddr {
+			warnBox([]string{
+				"[!] Port " + listenAddr + " is already in use.",
+				"    Handshake will use " + resolvedAddr + " instead.",
+				"    All agents will be registered to the new address.",
+			})
+			os.Setenv("HANDSHAKE_ADDR", resolvedAddr)
+			os.Setenv("HANDSHAKE_URL", "http://"+resolvedAddr+"/mcp")
+		} else {
+			fmt.Printf("  ✓ Port %s is free.\n", listenAddr)
+			fmt.Println()
+		}
+	}
 
 	// ── Step 1: database + agent registration ──────────────────────────────
 
@@ -90,11 +120,15 @@ func setupCmd(homeDir, dbPath string) {
 
 	if confirmYN("Start the daemon?", true) {
 		fmt.Println()
+		fmt.Printf("  Starting daemon on %s...\n", resolvedAddr)
 		if err := startDaemonBackground(); err != nil {
 			fmt.Printf("  ✗ Could not start daemon: %v\n", err)
 			fmt.Println("  Start manually with: handshake serve")
+		} else if daemonReady(resolvedAddr) {
+			fmt.Printf("  ✓ Handshake is running on %s\n", resolvedAddr)
 		} else {
-			fmt.Println("  ✓ Handshake is running on localhost:8765")
+			fmt.Printf("  ✗ Daemon did not respond on %s\n", resolvedAddr)
+			fmt.Println("  Check logs or run: handshake serve")
 		}
 		fmt.Println()
 		fmt.Println("  ✓ Step 3 complete.")
@@ -241,6 +275,40 @@ func startDaemonBackground() error {
 	}
 
 	return nil
+}
+
+// warnBox prints a bordered warning box. Lines must be plain ASCII so that
+// len() == display width and alignment is correct.
+func warnBox(lines []string) {
+	maxLen := 0
+	for _, l := range lines {
+		if len(l) > maxLen {
+			maxLen = len(l)
+		}
+	}
+	inner := maxLen + 4 // 2-space padding on each side
+	border := strings.Repeat("─", inner)
+	fmt.Println()
+	fmt.Printf("  ╔%s╗\n", border)
+	for _, l := range lines {
+		pad := strings.Repeat(" ", maxLen-len(l))
+		fmt.Printf("  │  %s%s  │\n", l, pad)
+	}
+	fmt.Printf("  ╚%s╝\n", border)
+	fmt.Println()
+}
+
+// daemonReady probes addr with short retries to confirm the daemon came up.
+func daemonReady(addr string) bool {
+	for i := 0; i < 5; i++ {
+		time.Sleep(300 * time.Millisecond)
+		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return true
+		}
+	}
+	return false
 }
 
 // registerAgentsIndented runs agent registration with indented output.
