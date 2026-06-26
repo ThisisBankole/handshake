@@ -76,28 +76,7 @@ func launchdDomain() string {
 }
 
 func installLaunchd(homeDir, binPath, logPath string) {
-	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Label</key>
-	<string>%s</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>%s</string>
-		<string>serve</string>
-	</array>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>KeepAlive</key>
-	<true/>
-	<key>StandardOutPath</key>
-	<string>%s</string>
-	<key>StandardErrorPath</key>
-	<string>%s</string>
-</dict>
-</plist>
-`, launchdLabel, binPath, logPath, logPath)
+	plist := launchdPlist(launchdLabel, binPath, logPath, resolvedAddr(), mcpURL())
 
 	plistPath := launchdPlistPath(homeDir)
 	if err := os.MkdirAll(filepath.Dir(plistPath), 0755); err != nil {
@@ -136,19 +115,7 @@ func systemdUnitPath(homeDir string) string {
 }
 
 func installSystemd(homeDir, binPath, logPath string) {
-	unit := fmt.Sprintf(`[Unit]
-Description=Handshake session portability daemon
-
-[Service]
-ExecStart=%s serve
-Restart=always
-RestartSec=2
-StandardOutput=append:%s
-StandardError=append:%s
-
-[Install]
-WantedBy=default.target
-`, binPath, logPath, logPath)
+	unit := systemdUnit(binPath, logPath, resolvedAddr(), mcpURL())
 
 	unitPath := systemdUnitPath(homeDir)
 	if err := os.MkdirAll(filepath.Dir(unitPath), 0755); err != nil {
@@ -172,4 +139,70 @@ WantedBy=default.target
 	fmt.Println("  Handshake now starts on login. Manage it with:")
 	fmt.Println("    systemctl --user restart handshake   # restart")
 	fmt.Println("    handshake uninstall-service          # remove")
+}
+
+// resolvedAddr returns the address the daemon should listen on, honouring the
+// HANDSHAKE_ADDR override (same resolution as `handshake serve`). Used to bake
+// the resolved port into the service definition so the login service starts on
+// the same port setup chose, not the default.
+func resolvedAddr() string {
+	if env := os.Getenv("HANDSHAKE_ADDR"); env != "" {
+		return env
+	}
+	return listenAddr
+}
+
+// launchdPlist renders a LaunchAgent plist that runs `handshake serve` on
+// login, with the resolved HANDSHAKE_ADDR and HANDSHAKE_URL baked in so the
+// service matches the address agents are registered against.
+func launchdPlist(label, binPath, logPath, addr, mcpURL string) string {
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>%s</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>%s</string>
+		<string>serve</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HANDSHAKE_ADDR</key>
+		<string>%s</string>
+		<key>HANDSHAKE_URL</key>
+		<string>%s</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>%s</string>
+	<key>StandardErrorPath</key>
+	<string>%s</string>
+</dict>
+</plist>
+`, label, binPath, addr, mcpURL, logPath, logPath)
+}
+
+// systemdUnit renders a systemd user unit with the resolved
+// HANDSHAKE_ADDR and HANDSHAKE_URL baked in.
+func systemdUnit(binPath, logPath, addr, mcpURL string) string {
+	return fmt.Sprintf(`[Unit]
+Description=Handshake session portability daemon
+
+[Service]
+ExecStart=%s serve
+Environment=HANDSHAKE_ADDR=%s
+Environment=HANDSHAKE_URL=%s
+Restart=always
+RestartSec=2
+StandardOutput=append:%s
+StandardError=append:%s
+
+[Install]
+WantedBy=default.target
+`, binPath, addr, mcpURL, logPath, logPath)
 }

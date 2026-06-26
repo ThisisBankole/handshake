@@ -100,9 +100,11 @@ func setupCmd(homeDir, dbPath string) {
 
 	fmt.Println()
 
+	serviceInstalled := false
 	if confirmYN("Install as a background service?", true) {
 		fmt.Println()
 		installServiceCmd(homeDir)
+		serviceInstalled = true
 		fmt.Println()
 		fmt.Println("  ✓ Step 2 complete.")
 	} else {
@@ -114,17 +116,17 @@ func setupCmd(homeDir, dbPath string) {
 	fmt.Println()
 
 	// ── Step 3: start daemon now ───────────────────────────────────────────
+	// When the login service was just installed, launchd (RunAtLoad/KeepAlive)
+	// or systemd (--now) has already started the daemon on the resolved port.
+	// Spawning a second `handshake serve` here would fail to bind the same port
+	// and exit silently, so we just verify the service-managed daemon is up.
+	// Only when no service was installed do we offer to start a one-off daemon.
 
-	fmt.Println("Step 3 of 3 — Start Handshake now.")
-	fmt.Println()
-
-	if confirmYN("Start the daemon?", true) {
+	if serviceInstalled {
+		fmt.Println("Step 3 of 3 — Verify the daemon is running.")
 		fmt.Println()
-		fmt.Printf("  Starting daemon on %s...\n", resolvedAddr)
-		if err := startDaemonBackground(); err != nil {
-			fmt.Printf("  ✗ Could not start daemon: %v\n", err)
-			fmt.Println("  Start manually with: handshake serve")
-		} else if daemonReady(resolvedAddr) {
+		fmt.Printf("  Checking daemon on %s...\n", resolvedAddr)
+		if daemonReady(resolvedAddr) {
 			fmt.Printf("  ✓ Handshake is running on %s\n", resolvedAddr)
 		} else {
 			fmt.Printf("  ✗ Daemon did not respond on %s\n", resolvedAddr)
@@ -133,9 +135,28 @@ func setupCmd(homeDir, dbPath string) {
 		fmt.Println()
 		fmt.Println("  ✓ Step 3 complete.")
 	} else {
+		fmt.Println("Step 3 of 3 — Start Handshake now.")
 		fmt.Println()
-		fmt.Println("  Skipped. Start manually later with: handshake serve")
-		fmt.Println("  ✓ Step 3 skipped.")
+
+		if confirmYN("Start the daemon?", true) {
+			fmt.Println()
+			fmt.Printf("  Starting daemon on %s...\n", resolvedAddr)
+			if err := startDaemonBackground(); err != nil {
+				fmt.Printf("  ✗ Could not start daemon: %v\n", err)
+				fmt.Println("  Start manually with: handshake serve")
+			} else if daemonReady(resolvedAddr) {
+				fmt.Printf("  ✓ Handshake is running on %s\n", resolvedAddr)
+			} else {
+				fmt.Printf("  ✗ Daemon did not respond on %s\n", resolvedAddr)
+				fmt.Println("  Check logs or run: handshake serve")
+			}
+			fmt.Println()
+			fmt.Println("  ✓ Step 3 complete.")
+		} else {
+			fmt.Println()
+			fmt.Println("  Skipped. Start manually later with: handshake serve")
+			fmt.Println("  ✓ Step 3 skipped.")
+		}
 	}
 
 	fmt.Println()

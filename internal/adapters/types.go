@@ -83,6 +83,10 @@ func IngestCodexSessions(database *db.Database, homeDir string) error {
 		return fmt.Errorf("failed to list Codex sessions: %w", err)
 	}
 
+	// Build the transcript path index once so each ReadSession below is an
+	// O(1) lookup instead of its own directory walk.
+	adapter.buildPathIndex()
+
 	for _, stub := range stubs {
 		// Check if already in canonical DB and up to date
 		existing, err := database.GetSession(stub.ID)

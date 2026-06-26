@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -50,6 +51,47 @@ func mcpURL() string {
 		return env
 	}
 	return "http://" + listenAddr + "/mcp"
+}
+
+// baseURL returns the daemon's root URL (without the /mcp path), matching the
+// address agents are registered against. Used to template the resolved port
+// into the hook scripts so they reach the daemon even when setup picked a
+// non-default port.
+func baseURL() string {
+	if env := os.Getenv("HANDSHAKE_URL"); env != "" {
+		return strings.TrimSuffix(env, "/mcp")
+	}
+	return "http://" + listenAddr
+}
+
+// injectBaseURL replaces the hardcoded localhost:8765 base URL in a hook
+// script with the resolved daemon URL. Hook scripts are invoked by agents
+// whose runtime environment does not carry HANDSHAKE_URL, so the URL must be
+// baked in at install time.
+func injectBaseURL(script []byte, baseURL string) []byte {
+	return bytes.ReplaceAll(script, []byte("http://localhost:8765"), []byte(baseURL))
+}
+
+// resolvePython returns the absolute path to a Python 3 interpreter, preferring
+// "python3" and falling back to "python" only when it is actually Python 3.
+// Returns "" if no suitable interpreter is on PATH. Hook scripts use only the
+// stdlib (json, urllib), so any Python 3 suffices. The absolute path is used so
+// hooks still run when the agent invokes them with a minimal PATH.
+func resolvePython() string {
+	if path, err := exec.LookPath("python3"); err == nil {
+		return path
+	}
+	if path, err := exec.LookPath("python"); err == nil && isPython3(path) {
+		return path
+	}
+	return ""
+}
+
+// isPython3 reports whether the binary at path is Python 3, by running a tiny
+// version probe. Prevents treating a Python 2 "python" as usable.
+func isPython3(path string) bool {
+	err := exec.Command(path, "-c", "import sys; sys.exit(0 if sys.version_info[0] >= 3 else 1)").Run()
+	return err == nil
 }
 
 func backup(path string) error {
@@ -102,6 +144,13 @@ func deregisterClaudeCode() {
 // --- Claude Code hooks (PreCompact + PostCompact) ---
 
 func registerClaudeCodeHooks(homeDir string) {
+	python := resolvePython()
+	if python == "" {
+		fmt.Println("- Claude Code hooks: Python 3 not found on PATH — skipping auto-checkpoint hooks")
+		fmt.Println("    Install Python 3 to enable automatic syncing, or checkpoint manually with \"checkpoint this session\".")
+		return
+	}
+
 	hooksDir := filepath.Join(homeDir, ".claude", "hooks")
 	if err := os.MkdirAll(hooksDir, 0755); err != nil {
 		fmt.Printf("✗ Claude Code hooks: could not create hooks directory: %v\n", err)
@@ -112,31 +161,31 @@ func registerClaudeCodeHooks(homeDir string) {
 	postCompactPath := filepath.Join(hooksDir, "handshake_post_compact.py")
 	stopPath := filepath.Join(hooksDir, "handshake_stop.py")
 
-	if err := os.WriteFile(preCompactPath, claudecode.PreCompactHook, 0755); err != nil {
+	if err := os.WriteFile(preCompactPath, injectBaseURL(claudecode.PreCompactHook, baseURL()), 0755); err != nil {
 		fmt.Printf("✗ Claude Code hooks: could not write pre_compact hook: %v\n", err)
 		return
 	}
-	if err := os.WriteFile(postCompactPath, claudecode.PostCompactHook, 0755); err != nil {
+	if err := os.WriteFile(postCompactPath, injectBaseURL(claudecode.PostCompactHook, baseURL()), 0755); err != nil {
 		fmt.Printf("✗ Claude Code hooks: could not write post_compact hook: %v\n", err)
 		return
 	}
 
-	if err := os.WriteFile(stopPath, claudecode.StopHook, 0755); err != nil { // ← add
+	if err := os.WriteFile(stopPath, injectBaseURL(claudecode.StopHook, baseURL()), 0755); err != nil { // ← add
 		fmt.Printf("✗ Claude Code hooks: could not write stop hook: %v\n", err)
 		return
 	}
 
 	hooksConfigPath := filepath.Join(homeDir, ".claude", "hooks.json")
-	registerClaudeCodeHooksConfig(hooksConfigPath, preCompactPath, postCompactPath, stopPath)
+	registerClaudeCodeHooksConfig(hooksConfigPath, python, preCompactPath, postCompactPath, stopPath)
 }
 
-func registerClaudeCodeHooksConfig(hooksConfigPath, preCompactPath, postCompactPath, stopPath string) {
+func registerClaudeCodeHooksConfig(hooksConfigPath, python, preCompactPath, postCompactPath, stopPath string) {
 	var config map[string]any
 	data, err := os.ReadFile(hooksConfigPath)
 	if err == nil {
 		if err := json.Unmarshal(data, &config); err != nil {
 			fmt.Println("- Claude Code hooks: hooks.json is not valid JSON; add manually:")
-			printClaudeCodeHooksSnippet(preCompactPath, postCompactPath, stopPath)
+			printClaudeCodeHooksSnippet(python, preCompactPath, postCompactPath, stopPath)
 			return
 		}
 	} else {
@@ -172,7 +221,7 @@ func registerClaudeCodeHooksConfig(hooksConfigPath, preCompactPath, postCompactP
 		"hooks": []any{
 			map[string]any{
 				"type":          "command",
-				"command":       fmt.Sprintf("python3 %s", preCompactPath),
+				"command":       fmt.Sprintf("%s %s", python, preCompactPath),
 				"statusMessage": "Handshake: checkpointing session",
 			},
 		},
@@ -183,7 +232,7 @@ func registerClaudeCodeHooksConfig(hooksConfigPath, preCompactPath, postCompactP
 		"hooks": []any{
 			map[string]any{
 				"type":          "command",
-				"command":       fmt.Sprintf("python3 %s", postCompactPath),
+				"command":       fmt.Sprintf("%s %s", python, postCompactPath),
 				"statusMessage": "Handshake: capturing compaction summary",
 			},
 		},
@@ -197,7 +246,7 @@ func registerClaudeCodeHooksConfig(hooksConfigPath, preCompactPath, postCompactP
 	hooks["Stop"] = append(stops, map[string]any{
 		"hooks": []any{map[string]any{
 			"type":          "command",
-			"command":       fmt.Sprintf("python3 %s", stopPath),
+			"command":       fmt.Sprintf("%s %s", python, stopPath),
 			"statusMessage": "Handshake: syncing session",
 			"timeout":       30,
 		}},
@@ -217,16 +266,16 @@ func registerClaudeCodeHooksConfig(hooksConfigPath, preCompactPath, postCompactP
 	fmt.Println("✓ Claude Code hooks: registered (PreCompact + PostCompact + Stop)")
 }
 
-func printClaudeCodeHooksSnippet(preCompactPath, postCompactPath, stopPath string) {
+func printClaudeCodeHooksSnippet(python, preCompactPath, postCompactPath, stopPath string) {
 	fmt.Printf(`  Add to ~/.claude/hooks.json:
   {
     "hooks": {
-      "PreCompact": [{"matcher":"auto|manual","hooks":[{"type":"command","command":"python3 %s"}]}],
-      "PostCompact": [{"matcher":"auto|manual","hooks":[{"type":"command","command":"python3 %s"}]}],
-      "Stop": [{"hooks":[{"type":"command","command":"python3 %s","timeout":30}]}]
+      "PreCompact": [{"matcher":"auto|manual","hooks":[{"type":"command","command":"%s %s"}]}],
+      "PostCompact": [{"matcher":"auto|manual","hooks":[{"type":"command","command":"%s %s"}]}],
+      "Stop": [{"hooks":[{"type":"command","command":"%s %s","timeout":30}]}]
     }
   }
-`, preCompactPath, postCompactPath, stopPath)
+`, python, preCompactPath, python, postCompactPath, python, stopPath)
 }
 
 func deregisterClaudeCodeHooks(homeDir string) {
@@ -454,6 +503,191 @@ func removeOpenCodePlugin(homeDir string) {
 
 // --- Hermes MCP registration ---
 
+// indentOf returns the number of leading space characters in line. YAML
+// forbids tabs for indentation, so only spaces are counted.
+func indentOf(line string) int {
+	n := 0
+	for _, r := range line {
+		if r == ' ' {
+			n++
+			continue
+		}
+		break
+	}
+	return n
+}
+
+// hermesChildIndent returns the indentation width of children under the
+// mcp_servers: key at mcpLine, by inspecting the first non-blank line that
+// follows it. Returns defaultIndent if mcp_servers has no children.
+func hermesChildIndent(lines []string, mcpLine, defaultIndent int) int {
+	for i := mcpLine + 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		if indentOf(lines[i]) == 0 {
+			break
+		}
+		return indentOf(lines[i])
+	}
+	return defaultIndent
+}
+
+// hermesGrandchildIndent returns the indentation of the first grandchild found
+// under any child of mcp_servers (i.e. the indent used for keys like url:).
+// Returns defaultIndent when mcp_servers has no children with children.
+func hermesGrandchildIndent(lines []string, mcpLine, childIndent, defaultIndent int) int {
+	for i := mcpLine + 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		ind := indentOf(lines[i])
+		if ind == 0 {
+			break
+		}
+		if ind == childIndent {
+			for j := i + 1; j < len(lines); j++ {
+				if strings.TrimSpace(lines[j]) == "" {
+					continue
+				}
+				jind := indentOf(lines[j])
+				if jind <= childIndent {
+					break
+				}
+				return jind
+			}
+		}
+	}
+	return defaultIndent
+}
+
+// hermesMCPBlockIsEmpty reports whether the mcp_servers: key at mcpLine has no
+// child entries (only blank/comment lines follow before the next top-level key).
+func hermesMCPBlockIsEmpty(lines []string, mcpLine int) bool {
+	for i := mcpLine + 1; i < len(lines); i++ {
+		t := strings.TrimSpace(lines[i])
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		return indentOf(lines[i]) == 0
+	}
+	return true
+}
+
+// hermesChildKey returns the YAML key of a child line (the text before the
+// first colon, trimmed).
+func hermesChildKey(line string) string {
+	return strings.TrimSpace(strings.SplitN(line, ":", 2)[0])
+}
+
+// hermesInjectMCP inserts the handshake MCP server under mcp_servers: in a
+// Hermes config split into lines. It returns the updated lines, whether
+// handshake was already present, and whether an mcp_servers: key at column 0
+// existed. The entry is inserted with indentation matching the existing
+// children of mcp_servers (defaulting to 2 spaces) so it works with configs
+// that use non-standard indentation.
+func hermesInjectMCP(lines []string, url string) (updated []string, already, mcpFound bool) {
+	mcpLine := -1
+	for i, line := range lines {
+		if strings.TrimRight(line, " \t") == "mcp_servers:" {
+			mcpLine = i
+			break
+		}
+	}
+	if mcpLine == -1 {
+		return lines, false, false
+	}
+
+	childIndent := hermesChildIndent(lines, mcpLine, 2)
+	urlIndent := hermesGrandchildIndent(lines, mcpLine, childIndent, childIndent+2)
+
+	for i := mcpLine + 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		ind := indentOf(lines[i])
+		if ind == 0 {
+			break
+		}
+		if ind == childIndent && hermesChildKey(lines[i]) == "handshake" {
+			return lines, true, true
+		}
+	}
+
+	entry := []string{
+		strings.Repeat(" ", childIndent) + "handshake:",
+		strings.Repeat(" ", urlIndent) + "url: " + url,
+	}
+	updated = append([]string{}, lines[:mcpLine+1]...)
+	updated = append(updated, entry...)
+	updated = append(updated, lines[mcpLine+1:]...)
+	return updated, false, true
+}
+
+// hermesRemoveMCP removes the handshake entry and all its nested children from
+// a Hermes config split into lines. Returns the updated lines and whether
+// handshake was present. If handshake was the only child, the mcp_servers: key
+// is removed too.
+func hermesRemoveMCP(lines []string) (updated []string, removed bool) {
+	mcpLine := -1
+	for i, line := range lines {
+		if strings.TrimRight(line, " \t") == "mcp_servers:" {
+			mcpLine = i
+			break
+		}
+	}
+	if mcpLine == -1 {
+		return lines, false
+	}
+
+	childIndent := hermesChildIndent(lines, mcpLine, 2)
+
+	removeStart := -1
+	for i := mcpLine + 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		ind := indentOf(lines[i])
+		if ind == 0 {
+			break
+		}
+		if ind == childIndent && hermesChildKey(lines[i]) == "handshake" {
+			removeStart = i
+			break
+		}
+	}
+	if removeStart == -1 {
+		return lines, false
+	}
+
+	// Remove handshake and every following line that is more indented than it
+	// (its children at any depth), plus trailing blank lines, stopping at the
+	// next sibling or parent. This handles nested children the old fixed-width
+	// scan would orphan.
+	handshakeIndent := indentOf(lines[removeStart])
+	end := removeStart + 1
+	for end < len(lines) {
+		line := lines[end]
+		if strings.TrimSpace(line) == "" {
+			end++
+			continue
+		}
+		if indentOf(line) > handshakeIndent {
+			end++
+			continue
+		}
+		break
+	}
+
+	updated = append([]string{}, lines[:removeStart]...)
+	updated = append(updated, lines[end:]...)
+
+	if hermesMCPBlockIsEmpty(updated, mcpLine) {
+		updated = append(updated[:mcpLine], updated[mcpLine+1:]...)
+	}
+	return updated, true
+}
+
 func registerHermes(homeDir string) {
 	configPath := filepath.Join(homeDir, ".hermes", "config.yaml")
 	snippet := fmt.Sprintf("mcp_servers:\n  handshake:\n    url: %s\n", mcpURL())
@@ -470,41 +704,28 @@ func registerHermes(homeDir string) {
 	}
 
 	lines := strings.Split(string(data), "\n")
-	mcpLine := -1
-	for i, line := range lines {
-		trimmed := strings.TrimRight(line, " \t")
-		if trimmed == "mcp_servers:" {
-			mcpLine = i
-		}
-		if mcpLine >= 0 && i > mcpLine && strings.TrimRight(line, " \t") == "  handshake:" {
-			fmt.Println("✓ Hermes: already registered")
-			return
-		}
-		if mcpLine >= 0 && i > mcpLine && len(line) > 0 && line[0] != ' ' && line[0] != '#' {
-			break
-		}
+	updated, already, mcpFound := hermesInjectMCP(lines, mcpURL())
+
+	var output string
+	switch {
+	case mcpFound && already:
+		fmt.Println("✓ Hermes: already registered")
+		return
+	case mcpFound:
+		output = strings.Join(updated, "\n")
+	case strings.Contains(string(data), "mcp_servers"):
+		fmt.Println("- Hermes: found an mcp_servers key in an unexpected form; add manually to " + configPath + ":")
+		fmt.Println(indent(snippet, "    "))
+		return
+	default:
+		output = strings.TrimRight(string(data), "\n") + "\n\n" + snippet
 	}
 
 	if err := backup(configPath); err != nil {
 		fmt.Printf("✗ Hermes: could not back up config, not modifying it: %v\n", err)
 		return
 	}
-
-	var updated string
-	if mcpLine >= 0 {
-		inserted := append([]string{}, lines[:mcpLine+1]...)
-		inserted = append(inserted, "  handshake:", "    url: "+mcpURL())
-		inserted = append(inserted, lines[mcpLine+1:]...)
-		updated = strings.Join(inserted, "\n")
-	} else if strings.Contains(string(data), "mcp_servers:") {
-		fmt.Println("- Hermes: found an mcp_servers key in an unexpected form; add manually to " + configPath + ":")
-		fmt.Println(indent(snippet, "    "))
-		return
-	} else {
-		updated = strings.TrimRight(string(data), "\n") + "\n\n" + snippet
-	}
-
-	if err := os.WriteFile(configPath, []byte(updated), 0600); err != nil {
+	if err := os.WriteFile(configPath, []byte(output), 0600); err != nil {
 		fmt.Printf("✗ Hermes: could not write config: %v\n", err)
 		return
 	}
@@ -525,30 +746,8 @@ func deregisterHermes(homeDir string) {
 	}
 
 	lines := strings.Split(string(data), "\n")
-	mcpLine := -1
-	removeStart := -1
-	removeEnd := -1
-
-	for i, line := range lines {
-		trimmed := strings.TrimRight(line, " \t")
-		if trimmed == "mcp_servers:" {
-			mcpLine = i
-			continue
-		}
-		if mcpLine >= 0 && trimmed == "  handshake:" {
-			removeStart = i
-			continue
-		}
-		if removeStart >= 0 && removeEnd < 0 {
-			if strings.HasPrefix(line, "    ") {
-				removeEnd = i
-				continue
-			}
-			break
-		}
-	}
-
-	if removeStart < 0 {
+	updated, removed := hermesRemoveMCP(lines)
+	if !removed {
 		fmt.Println("✓ Hermes: handshake not in config, nothing to do")
 		return
 	}
@@ -557,30 +756,6 @@ func deregisterHermes(homeDir string) {
 		fmt.Printf("✗ Hermes: could not back up config, not modifying it: %v\n", err)
 		return
 	}
-
-	end := removeEnd
-	if end < removeStart {
-		end = removeStart
-	}
-	updated := append(lines[:removeStart], lines[end+1:]...)
-
-	if mcpLine >= 0 {
-		remaining := updated[mcpLine+1:]
-		empty := true
-		for _, l := range remaining {
-			if strings.TrimSpace(l) == "" {
-				continue
-			}
-			if strings.HasPrefix(l, " ") {
-				empty = false
-			}
-			break
-		}
-		if empty {
-			updated = append(updated[:mcpLine], updated[mcpLine+1:]...)
-		}
-	}
-
 	if err := os.WriteFile(configPath, []byte(strings.Join(updated, "\n")), 0600); err != nil {
 		fmt.Printf("✗ Hermes: could not write config: %v\n", err)
 		return
@@ -604,7 +779,7 @@ func registerHermesPlugin(homeDir string) {
 		fmt.Printf("✗ Hermes plugin: could not write HOOK.yaml: %v\n", err)
 		return
 	}
-	if err := os.WriteFile(handlerPath, hermesplugin.HandlerPY, 0755); err != nil {
+	if err := os.WriteFile(handlerPath, injectBaseURL(hermesplugin.HandlerPY, baseURL()), 0755); err != nil {
 		fmt.Printf("✗ Hermes plugin: could not write handler.py: %v\n", err)
 		return
 	}
@@ -772,6 +947,13 @@ func registerCodexHooks(homeDir string) {
 		return // silently skip — codex not installed
 	}
 
+	python := resolvePython()
+	if python == "" {
+		fmt.Println("- Codex hooks: Python 3 not found on PATH — skipping auto-checkpoint hooks")
+		fmt.Println("    Install Python 3 to enable automatic syncing, or checkpoint manually with \"checkpoint this session\".")
+		return
+	}
+
 	hooksDir := filepath.Join(homeDir, ".codex", "hooks")
 	if err := os.MkdirAll(hooksDir, 0755); err != nil {
 		fmt.Printf("✗ Codex hooks: could not create hooks directory: %v\n", err)
@@ -782,24 +964,24 @@ func registerCodexHooks(homeDir string) {
 	postCompactPath := filepath.Join(hooksDir, "handshake_post_compact.py")
 	stopPath := filepath.Join(hooksDir, "handshake_stop.py")
 
-	if err := os.WriteFile(preCompactPath, codexplugin.PreCompactHook, 0755); err != nil {
+	if err := os.WriteFile(preCompactPath, injectBaseURL(codexplugin.PreCompactHook, baseURL()), 0755); err != nil {
 		fmt.Printf("✗ Codex hooks: could not write pre_compact hook: %v\n", err)
 		return
 	}
-	if err := os.WriteFile(postCompactPath, codexplugin.PostCompactHook, 0755); err != nil {
+	if err := os.WriteFile(postCompactPath, injectBaseURL(codexplugin.PostCompactHook, baseURL()), 0755); err != nil {
 		fmt.Printf("✗ Codex hooks: could not write post_compact hook: %v\n", err)
 		return
 	}
-	if err := os.WriteFile(stopPath, codexplugin.StopHook, 0755); err != nil {
+	if err := os.WriteFile(stopPath, injectBaseURL(codexplugin.StopHook, baseURL()), 0755); err != nil {
 		fmt.Printf("✗ Codex hooks: could not write stop hook: %v\n", err)
 		return
 	}
 
 	hooksConfigPath := filepath.Join(homeDir, ".codex", "hooks.json")
-	registerCodexHooksConfig(hooksConfigPath, preCompactPath, postCompactPath, stopPath)
+	registerCodexHooksConfig(hooksConfigPath, python, preCompactPath, postCompactPath, stopPath)
 }
 
-func registerCodexHooksConfig(hooksConfigPath, preCompactPath, postCompactPath, stopPath string) {
+func registerCodexHooksConfig(hooksConfigPath, python, preCompactPath, postCompactPath, stopPath string) {
 	var config map[string]any
 	data, err := os.ReadFile(hooksConfigPath)
 	if err == nil {
@@ -842,7 +1024,7 @@ func registerCodexHooksConfig(hooksConfigPath, preCompactPath, postCompactPath, 
 		"matcher": "auto|manual",
 		"hooks": []any{map[string]any{
 			"type":          "command",
-			"command":       fmt.Sprintf("python3 %s", preCompactPath),
+			"command":       fmt.Sprintf("%s %s", python, preCompactPath),
 			"statusMessage": "Handshake: checkpointing session",
 		}},
 	})
@@ -853,7 +1035,7 @@ func registerCodexHooksConfig(hooksConfigPath, preCompactPath, postCompactPath, 
 		"matcher": "auto|manual",
 		"hooks": []any{map[string]any{
 			"type":          "command",
-			"command":       fmt.Sprintf("python3 %s", postCompactPath),
+			"command":       fmt.Sprintf("%s %s", python, postCompactPath),
 			"statusMessage": "Handshake: capturing compaction summary",
 		}},
 	})
@@ -863,7 +1045,7 @@ func registerCodexHooksConfig(hooksConfigPath, preCompactPath, postCompactPath, 
 	hooks["Stop"] = append(stops, map[string]any{
 		"hooks": []any{map[string]any{
 			"type":          "command",
-			"command":       fmt.Sprintf("python3 %s", stopPath),
+			"command":       fmt.Sprintf("%s %s", python, stopPath),
 			"statusMessage": "Handshake: syncing session",
 			"timeout":       30,
 		}},

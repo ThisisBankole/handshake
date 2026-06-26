@@ -57,6 +57,13 @@ func New(dbPath string) (*Database, error) {
 		return nil, fmt.Errorf("failed to open SQLite database: %w", err)
 	}
 
+	// SQLite serializes writes on a single database file. Limiting the pool to
+	// one connection prevents concurrent writers from multiple pooled
+	// connections raising SQLITE_BUSY (which busy_timeout only sometimes
+	// resolves). Reads and writes queue on the same connection; with WAL and
+	// fast indexed queries this is not a bottleneck for this workload.
+	conn.SetMaxOpenConns(1)
+
 	db := &Database{db: conn}
 	if err := db.initSchema(); err != nil {
 		conn.Close()

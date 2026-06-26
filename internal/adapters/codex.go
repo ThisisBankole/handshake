@@ -17,7 +17,8 @@ import (
 //	~/.codex/session_index.jsonl  — index of all sessions (id, title, updated_at)
 //	~/.codex/sessions/YYYY/MM/DD/rollout-<datetime>-<id>.jsonl — transcripts
 type CodexAdapter struct {
-	codexDir string
+	codexDir  string
+	pathIndex map[string]string // session ID → transcript path (lazy, one walk)
 }
 
 func NewCodexAdapter(homeDir string) *CodexAdapter {
@@ -244,19 +245,26 @@ func (a *CodexAdapter) ReadSession(sessionID string) (*SessionData, error) {
 	return session, nil
 }
 
-// findSessionFile searches for the JSONL file matching the given session ID.
-// Codex organises files as sessions/YYYY/MM/DD/rollout-<datetime>-<id>.jsonl
-// so we glob rather than computing the path.
+// findSessionFile locates the JSONL transcript for a session ID. Codex files
+// live at sessions/YYYY/MM/DD/rollout-<datetime>-<id>.jsonl, so the path can't
+// be computed from the ID alone.
+//
+// If a path index has been built (via buildPathIndex, used during bulk ingest),
+// the lookup is O(1). Otherwise it walks the sessions tree until the matching
+// file is found — optimal for a single restore, which doesn't pay for a full
+// index build.
 func (a *CodexAdapter) findSessionFile(sessionID string) (string, error) {
-	sessionsDir := filepath.Join(a.codexDir, "sessions")
-
-	// Walk the sessions directory looking for a file containing the session ID
-	var found string
-	err := filepath.Walk(sessionsDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // skip unreadable dirs
+	if a.pathIndex != nil {
+		if p, ok := a.pathIndex[sessionID]; ok {
+			return p, nil
 		}
-		if info.IsDir() {
+		return "", fmt.Errorf("Codex session %s not found", sessionID)
+	}
+
+	sessionsDir := filepath.Join(a.codexDir, "sessions")
+	var found string
+	_ = filepath.Walk(sessionsDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
 			return nil
 		}
 		if strings.HasSuffix(path, sessionID+".jsonl") {
@@ -265,14 +273,66 @@ func (a *CodexAdapter) findSessionFile(sessionID string) (string, error) {
 		}
 		return nil
 	})
-
-	if err != nil {
-		return "", fmt.Errorf("failed to search Codex sessions: %w", err)
-	}
 	if found == "" {
 		return "", fmt.Errorf("Codex session %s not found", sessionID)
 	}
 	return found, nil
+}
+
+// buildPathIndex walks the Codex sessions directory once and records each
+// transcript file keyed by its session ID (the UUID in the filename). Call
+// once before many ReadSession calls so each is an O(1) lookup instead of its
+// own directory walk. Missing sessions directory yields an empty index.
+func (a *CodexAdapter) buildPathIndex() {
+	a.pathIndex = make(map[string]string)
+	sessionsDir := filepath.Join(a.codexDir, "sessions")
+	_ = filepath.Walk(sessionsDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if id := idFromCodexFilename(info.Name()); id != "" {
+			a.pathIndex[id] = path
+		}
+		return nil
+	})
+}
+
+// idFromCodexFilename extracts the session ID (UUID) from a Codex transcript
+// filename of the form rollout-<datetime>-<uuid>.jsonl. Returns "" if the name
+// does not end in a well-formed UUID.
+func idFromCodexFilename(name string) string {
+	if !strings.HasSuffix(name, ".jsonl") {
+		return ""
+	}
+	base := strings.TrimSuffix(name, ".jsonl")
+	if len(base) < 36 {
+		return ""
+	}
+	id := base[len(base)-36:]
+	if !isUUID(id) {
+		return ""
+	}
+	return id
+}
+
+// isUUID reports whether s has the 8-4-4-4-12 hex shape of a UUID.
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, c := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // titleFromIndex reads session_index.jsonl to find the title for a session ID.
