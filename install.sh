@@ -78,6 +78,15 @@ rm -rf "$TMP"
 echo "✓ Handshake $VERSION installed to $INSTALL_DIR/$BINARY"
 echo ""
 
+# ── Non-interactive setup ──────────────────────────────────────────────────
+# Register with agents and install the login service without prompting.
+# The service starts the daemon automatically on login.
+
+echo "Running non-interactive setup..."
+"$INSTALL_DIR/$BINARY" init
+"$INSTALL_DIR/$BINARY" install-service
+echo ""
+
 # ── PATH check ─────────────────────────────────────────────────────────────
 
 case ":$PATH:" in
@@ -98,9 +107,5 @@ esac
 
 # ── Done ───────────────────────────────────────────────────────────────────
 
-echo "Get started:"
-echo ""
-echo "  handshake setup"
-echo ""
-echo "This will register Handshake with your agents and start the daemon."
+echo "✓ Handshake is ready."
 echo "Your sessions are stored locally — no cloud, no accounts."

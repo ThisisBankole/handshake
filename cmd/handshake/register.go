@@ -110,10 +110,10 @@ func registerClaudeCode() {
 		fmt.Printf("    claude mcp add -s user --transport http handshake %s\n", mcpURL())
 		return
 	}
-	if err := exec.Command("claude", "mcp", "get", "handshake").Run(); err == nil {
-		fmt.Println("✓ Claude Code: already registered")
-		return
-	}
+	// Remove any existing registration (ignore "not found") then re-add with the
+	// current URL, so re-running setup corrects a stale port instead of leaving
+	// the old URL in place via an "already registered" short-circuit.
+	exec.Command("claude", "mcp", "remove", "-s", "user", "handshake").Run()
 	out, err := exec.Command("claude", "mcp", "add", "-s", "user", "--transport", "http", "handshake", mcpURL()).CombinedOutput()
 	if err != nil {
 		fmt.Printf("✗ Claude Code: claude mcp add failed: %s\n", strings.TrimSpace(string(out)))
@@ -345,12 +345,14 @@ func deregisterClaudeCodeHooks(homeDir string) {
 func registerOpenCode(homeDir string) {
 	configPath := filepath.Join(homeDir, ".config", "opencode", "opencode.json")
 	entry := map[string]any{"type": "remote", "url": mcpURL()}
+	pluginPath := filepath.Join(homeDir, ".config", "opencode", "plugins", "handshake.js")
 
 	data, err := os.ReadFile(configPath)
 	if os.IsNotExist(err) {
 		config := map[string]any{
 			"$schema": "https://opencode.ai/config.json",
 			"mcp":     map[string]any{"handshake": entry},
+			"plugin":  []any{pluginPath},
 		}
 		if writeErr := writeJSON(configPath, config); writeErr != nil {
 			fmt.Printf("✗ OpenCode: could not create config: %v\n", writeErr)
@@ -371,46 +373,26 @@ func registerOpenCode(homeDir string) {
 		return
 	}
 
+	// Always set the handshake entry with the current URL so re-running setup
+	// corrects a stale port instead of preserving the old one.
 	mcp, _ := config["mcp"].(map[string]any)
 	if mcp == nil {
 		mcp = map[string]any{}
 	}
-	if _, exists := mcp["handshake"]; exists {
-		// MCP already registered — but still ensure plugin key is present
-		pluginPath := filepath.Join(homeDir, ".config", "opencode", "plugins", "handshake.js")
-		existing, _ := config["plugin"].([]any)
-		alreadyRegistered := false
-		for _, p := range existing {
-			if p == pluginPath {
-				alreadyRegistered = true
-				break
-			}
-		}
-		if !alreadyRegistered {
-			config["plugin"] = append(existing, pluginPath)
-			backup(configPath)
-			writeJSON(configPath, config)
-			fmt.Println("✓ OpenCode: plugin path registered")
-		} else {
-			fmt.Println("✓ OpenCode: already registered")
-		}
-		return
-	}
 	mcp["handshake"] = entry
 	config["mcp"] = mcp
 
-	// Register the plugin file explicitly — directory auto-discovery
-	// is unreliable in some OpenCode versions
-	pluginPath := filepath.Join(homeDir, ".config", "opencode", "plugins", "handshake.js")
+	// Ensure the plugin file is registered — directory auto-discovery is
+	// unreliable in some OpenCode versions.
 	existing, _ := config["plugin"].([]any)
-	alreadyRegistered := false
+	pluginRegistered := false
 	for _, p := range existing {
 		if p == pluginPath {
-			alreadyRegistered = true
+			pluginRegistered = true
 			break
 		}
 	}
-	if !alreadyRegistered {
+	if !pluginRegistered {
 		config["plugin"] = append(existing, pluginPath)
 	}
 
@@ -624,11 +606,11 @@ func hermesInjectMCP(lines []string, url string) (updated []string, already, mcp
 	return updated, false, true
 }
 
-// hermesRemoveMCP removes the handshake entry and all its nested children from
-// a Hermes config split into lines. Returns the updated lines and whether
-// handshake was present. If handshake was the only child, the mcp_servers: key
-// is removed too.
-func hermesRemoveMCP(lines []string) (updated []string, removed bool) {
+// hermesRemoveHandshake removes the handshake entry and all its nested children
+// from a Hermes config split into lines. The mcp_servers: key is kept even if
+// handshake was the only child. Returns the updated lines and whether handshake
+// was present.
+func hermesRemoveHandshake(lines []string) (updated []string, removed bool) {
 	mcpLine := -1
 	for i, line := range lines {
 		if strings.TrimRight(line, " \t") == "mcp_servers:" {
@@ -660,10 +642,6 @@ func hermesRemoveMCP(lines []string) (updated []string, removed bool) {
 		return lines, false
 	}
 
-	// Remove handshake and every following line that is more indented than it
-	// (its children at any depth), plus trailing blank lines, stopping at the
-	// next sibling or parent. This handles nested children the old fixed-width
-	// scan would orphan.
 	handshakeIndent := indentOf(lines[removeStart])
 	end := removeStart + 1
 	for end < len(lines) {
@@ -681,8 +659,26 @@ func hermesRemoveMCP(lines []string) (updated []string, removed bool) {
 
 	updated = append([]string{}, lines[:removeStart]...)
 	updated = append(updated, lines[end:]...)
+	return updated, true
+}
 
-	if hermesMCPBlockIsEmpty(updated, mcpLine) {
+// hermesRemoveMCP removes the handshake entry and all its nested children from
+// a Hermes config split into lines. Returns the updated lines and whether
+// handshake was present. If handshake was the only child, the mcp_servers: key
+// is removed too.
+func hermesRemoveMCP(lines []string) (updated []string, removed bool) {
+	updated, removed = hermesRemoveHandshake(lines)
+	if !removed {
+		return updated, removed
+	}
+	mcpLine := -1
+	for i, line := range updated {
+		if strings.TrimRight(line, " \t") == "mcp_servers:" {
+			mcpLine = i
+			break
+		}
+	}
+	if mcpLine != -1 && hermesMCPBlockIsEmpty(updated, mcpLine) {
 		updated = append(updated[:mcpLine], updated[mcpLine+1:]...)
 	}
 	return updated, true
@@ -690,10 +686,10 @@ func hermesRemoveMCP(lines []string) (updated []string, removed bool) {
 
 func registerHermes(homeDir string) {
 	configPath := filepath.Join(homeDir, ".hermes", "config.yaml")
-	snippet := fmt.Sprintf("mcp_servers:\n  handshake:\n    url: %s\n", mcpURL())
 
 	data, err := os.ReadFile(configPath)
 	if os.IsNotExist(err) {
+		snippet := fmt.Sprintf("mcp_servers:\n  handshake:\n    url: %s\n", mcpURL())
 		fmt.Println("- Hermes: no config found — if Hermes is installed, add to " + configPath + ":")
 		fmt.Println(indent(snippet, "    "))
 		return
@@ -704,20 +700,14 @@ func registerHermes(homeDir string) {
 	}
 
 	lines := strings.Split(string(data), "\n")
-	updated, already, mcpFound := hermesInjectMCP(lines, mcpURL())
+	lines, _ = hermesRemoveHandshake(lines)
+	updated, _, mcpFound := hermesInjectMCP(lines, mcpURL())
 
 	var output string
-	switch {
-	case mcpFound && already:
-		fmt.Println("✓ Hermes: already registered")
-		return
-	case mcpFound:
+	if mcpFound {
 		output = strings.Join(updated, "\n")
-	case strings.Contains(string(data), "mcp_servers"):
-		fmt.Println("- Hermes: found an mcp_servers key in an unexpected form; add manually to " + configPath + ":")
-		fmt.Println(indent(snippet, "    "))
-		return
-	default:
+	} else {
+		snippet := fmt.Sprintf("mcp_servers:\n  handshake:\n    url: %s\n", mcpURL())
 		output = strings.TrimRight(string(data), "\n") + "\n\n" + snippet
 	}
 
@@ -832,10 +822,30 @@ func promptYesNo(question string) bool {
 
 // --- Codex MCP registration ---
 
-// registerCodexMCP adds Handshake as an MCP server in ~/.codex/config.toml.
-// Codex uses TOML not JSON, so we append a snippet rather than parsing.
+// removeCodexMCPBlock strips the [mcp_servers.handshake] section (header +
+// subsequent key-value lines) from a TOML file split into lines.
+func removeCodexMCPBlock(lines []string) []string {
+	var filtered []string
+	skip := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "[mcp_servers.handshake]" {
+			skip = true
+			continue
+		}
+		if skip && strings.HasPrefix(trimmed, "[") {
+			skip = false
+		}
+		if !skip {
+			filtered = append(filtered, line)
+		}
+	}
+	return filtered
+}
+
+// registerCodexMCP registers Handshake as an MCP server in ~/.codex/config.toml.
+// Removes any stale [mcp_servers.handshake] block first, then appends fresh.
 func registerCodexMCP(homeDir string) {
-	// Check if codex is installed
 	if _, err := exec.LookPath("codex"); err != nil {
 		fmt.Println("- Codex: not installed, skipping")
 		return
@@ -845,7 +855,6 @@ func registerCodexMCP(homeDir string) {
 
 	data, err := os.ReadFile(configPath)
 	if os.IsNotExist(err) {
-		// Create minimal config with MCP entry
 		snippet := fmt.Sprintf("[mcp_servers.handshake]\nurl = %q\n", mcpURL())
 		if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
 			fmt.Printf("✗ Codex: could not create config directory: %v\n", err)
@@ -863,26 +872,19 @@ func registerCodexMCP(homeDir string) {
 		return
 	}
 
-	// Already registered?
-	if strings.Contains(string(data), "[mcp_servers.handshake]") {
-		fmt.Println("✓ Codex: already registered")
-		return
-	}
+	lines := strings.Split(string(data), "\n")
+	lines = removeCodexMCPBlock(lines)
+	output := strings.Join(lines, "\n")
+	snippet := fmt.Sprintf("\n[mcp_servers.handshake]\nurl = %q\n", mcpURL())
 
-	// Back up and append
 	if err := backup(configPath); err != nil {
 		fmt.Printf("✗ Codex: could not back up config.toml: %v\n", err)
 		return
 	}
-
-	snippet := fmt.Sprintf("\n[mcp_servers.handshake]\nurl = %q\n", mcpURL())
-	f, err := os.OpenFile(configPath, os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		fmt.Printf("✗ Codex: could not open config.toml: %v\n", err)
+	if err := os.WriteFile(configPath, []byte(output+snippet), 0644); err != nil {
+		fmt.Printf("✗ Codex: could not write config.toml: %v\n", err)
 		return
 	}
-	defer f.Close()
-	f.WriteString(snippet)
 	fmt.Println("✓ Codex: registered (config.toml, backup saved)")
 }
 
@@ -901,28 +903,11 @@ func deregisterCodexMCP(homeDir string) {
 		return
 	}
 
-	if !strings.Contains(string(data), "[mcp_servers.handshake]") {
+	lines := strings.Split(string(data), "\n")
+	filtered := removeCodexMCPBlock(lines)
+	if len(filtered) == len(lines) {
 		fmt.Println("✓ Codex: handshake not in config, nothing to do")
 		return
-	}
-
-	// Remove the [mcp_servers.handshake] block — find it and strip it
-	lines := strings.Split(string(data), "\n")
-	var filtered []string
-	skip := false
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "[mcp_servers.handshake]" {
-			skip = true
-			continue
-		}
-		// Stop skipping when we hit the next section header
-		if skip && strings.HasPrefix(trimmed, "[") {
-			skip = false
-		}
-		if !skip {
-			filtered = append(filtered, line)
-		}
 	}
 
 	if err := backup(configPath); err != nil {

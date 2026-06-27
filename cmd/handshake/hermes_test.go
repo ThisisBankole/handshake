@@ -123,6 +123,83 @@ func TestHermesRemoveMCP_NoMcpServers(t *testing.T) {
 
 // Round-trip: inject then remove should restore the original mcp_servers block
 // (for a config that had other children).
+func TestHermesRemoveHandshake_RemovesHandshakeKeepsMcpServersWhenEmpty(t *testing.T) {
+	in := "mcp_servers:\n  handshake:\n    url: http://x\n"
+	updated, removed := hermesRemoveHandshake(splitYAML(in))
+	if !removed {
+		t.Fatal("removed=false, want true")
+	}
+	out := strings.Join(updated, "\n")
+	if !strings.Contains(out, "mcp_servers:") {
+		t.Fatalf("mcp_servers: should be kept even when empty:\n%s", out)
+	}
+	if strings.Contains(out, "handshake") {
+		t.Fatalf("handshake should be removed:\n%s", out)
+	}
+}
+
+func TestHermesRemoveHandshake_KeepsSiblings(t *testing.T) {
+	in := "mcp_servers:\n  handshake:\n    url: http://x\n  other:\n    url: http://y\n"
+	updated, removed := hermesRemoveHandshake(splitYAML(in))
+	if !removed {
+		t.Fatal("removed=false, want true")
+	}
+	out := strings.Join(updated, "\n")
+	if strings.Contains(out, "handshake") {
+		t.Fatalf("handshake still present:\n%s", out)
+	}
+	if !strings.Contains(out, "other:\n    url: http://y") {
+		t.Fatalf("sibling corrupted:\n%s", out)
+	}
+}
+
+func TestHermesRemoveHandshake_NotPresent(t *testing.T) {
+	in := "mcp_servers:\n  other:\n    url: http://x\n"
+	updated, removed := hermesRemoveHandshake(splitYAML(in))
+	if removed {
+		t.Fatal("removed=true, want false")
+	}
+	if strings.Join(updated, "\n") != strings.Join(splitYAML(in), "\n") {
+		t.Fatalf("lines changed when not present:\n%s", strings.Join(updated, "\n"))
+	}
+}
+
+func TestHermesRemoveHandshake_NoMcpServers(t *testing.T) {
+	in := "model: gpt\n"
+	_, removed := hermesRemoveHandshake(splitYAML(in))
+	if removed {
+		t.Fatal("removed=true, want false")
+	}
+}
+
+func TestHermesRemoveThenInject_ReplacesStaleURL(t *testing.T) {
+	in := "mcp_servers:\n  handshake:\n    url: http://old:8765/mcp\n  other:\n    url: http://other\n"
+	lines := splitYAML(in)
+	lines, _ = hermesRemoveHandshake(lines)
+	updated, _, _ := hermesInjectMCP(lines, "http://new:9999/mcp")
+	out := strings.Join(updated, "\n")
+	if !strings.Contains(out, "url: http://new:9999/mcp") {
+		t.Fatalf("new URL not injected:\n%s", out)
+	}
+	if strings.Contains(out, "http://old:8765/mcp") {
+		t.Fatalf("old URL still present:\n%s", out)
+	}
+	if !strings.Contains(out, "other:\n    url: http://other") {
+		t.Fatalf("sibling other corrupted:\n%s", out)
+	}
+}
+
+func TestHermesRemoveThenInject_HandshakeOnlyChild(t *testing.T) {
+	in := "mcp_servers:\n  handshake:\n    url: http://old/mcp\n"
+	lines := splitYAML(in)
+	lines, _ = hermesRemoveHandshake(lines)
+	updated, _, _ := hermesInjectMCP(lines, "http://new/mcp")
+	out := strings.Join(updated, "\n")
+	if !strings.Contains(out, "mcp_servers:\n  handshake:\n    url: http://new/mcp") {
+		t.Fatalf("stale URL not replaced:\n%s", out)
+	}
+}
+
 func TestHermesInjectThenRemove_RoundTrip(t *testing.T) {
 	original := "mcp_servers:\n  other:\n    url: http://x\n"
 	injected, _, _ := hermesInjectMCP(splitYAML(original), "http://localhost:8766/mcp")

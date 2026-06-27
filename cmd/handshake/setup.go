@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,6 +39,14 @@ func setupCmd(homeDir, dbPath string) {
 		if os.Getenv("HANDSHAKE_URL") == "" {
 			os.Setenv("HANDSHAKE_URL", "http://"+resolvedAddr+"/mcp")
 		}
+	} else if handshakeAt(listenAddr) {
+		// A Handshake daemon is already running on the default port — reuse it
+		// so re-running setup keeps agents on their current port instead of
+		// treating the daemon itself as a conflict and migrating.
+		resolvedAddr = listenAddr
+		fmt.Printf("  ✓ Handshake already running on %s — reusing\n", resolvedAddr)
+		fmt.Println()
+		os.Setenv("HANDSHAKE_URL", "http://"+resolvedAddr+"/mcp")
 	} else {
 		resolvedAddr = findFreePort(listenAddr)
 		if resolvedAddr != listenAddr {
@@ -330,6 +339,19 @@ func daemonReady(addr string) bool {
 		}
 	}
 	return false
+}
+
+// handshakeAt reports whether a Handshake daemon is already listening on addr,
+// by probing its /health endpoint. Used so re-running setup reuses the daemon's
+// current port instead of treating it as a conflict and migrating to a new one.
+func handshakeAt(addr string) bool {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("http://" + addr + "/health")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }
 
 // registerAgentsIndented runs agent registration with indented output.
