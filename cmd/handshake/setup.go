@@ -192,6 +192,7 @@ func uninstallCmd(homeDir string) {
 	// Stop and remove the service first
 	fmt.Println("Stopping the daemon...")
 	uninstallServiceCmd(homeDir)
+	killRunningServe()
 	fmt.Println()
 
 	// Remove from all agents
@@ -281,6 +282,18 @@ func removeHandshakeBinary() error {
 	}
 	fmt.Println("  ✓ Binary removed")
 	return nil
+}
+
+// killRunningServe kills all running "handshake serve" processes using pkill.
+// This is called during uninstall so stale daemon processes don't hold the port
+// after the binary is removed. The current process (which runs "handshake
+// uninstall", not "handshake serve") is not affected.
+func killRunningServe() {
+	if err := exec.Command("pkill", "-f", "handshake serve").Run(); err != nil {
+		// pkill exits 1 when no matching processes — that's fine
+		return
+	}
+	fmt.Println("  ✓ Stopped running handshake serve processes")
 }
 
 // startDaemonBackground starts handshake serve as a detached background process.

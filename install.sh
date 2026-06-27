@@ -82,6 +82,9 @@ echo ""
 # Register with agents and install the login service without prompting.
 # The service starts the daemon automatically on login.
 
+# Kill any stale handshake serve processes that might be holding the port
+pkill -f "handshake serve" 2>/dev/null || true
+
 echo "Running non-interactive setup..."
 "$INSTALL_DIR/$BINARY" init
 "$INSTALL_DIR/$BINARY" install-service
