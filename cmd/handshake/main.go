@@ -57,7 +57,7 @@ func main() {
 			agent = os.Args[2]
 		}
 		pullCmd(homeDir, dbPath, agent)
-	case "browse", "ui":
+	case "browse", "ui", "b", "-b", "--b":
 		browseCmd(homeDir, dbPath)
 	case "restore":
 		if len(os.Args) < 3 {
@@ -95,7 +95,7 @@ func usage() {
 	fmt.Println("  setup              Guided setup — registers with agents, installs service (default)")
 	fmt.Println("  init               Non-interactive setup — create database and register with agents")
 	fmt.Println("  serve              Start the MCP + ingest server (default: " + listenAddr + ")")
-	fmt.Println("  browse             Interactive session browser (TUI)")
+	fmt.Println("  browse             Interactive session browser (TUI) — also: b, -b, --b, ui")
 	fmt.Println("  list               List checkpointed sessions (opens browser on a terminal)")
 	fmt.Println("  pull [agent]       Import sessions from agents' native storage")
 	fmt.Println("                     (agents: " + strings.Join(adapters.PullableAgents, ", ") + "; default all)")
