@@ -65,7 +65,7 @@ func (u *ui) timelineView(s *db.Session, chapters []timeline.Chapter) tview.Prim
 		SetText("\n" + tag(colAccent) + "timeline · " + tview.Escape(oneLine(s.Title, 60)) + "[-]")
 	hints := tview.NewTextView()
 	hints.SetDynamicColors(true).SetTextAlign(tview.AlignCenter).
-		SetText(tag(colFaint) + "esc back · ↑↓ move · enter open/fold · d detail · r brief · y restore")
+		SetText("[::b]" + tag(colDim) + "esc back · ↑↓ move · enter open/fold · d detail · y restore")
 
 	column := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(title, 2, 0, false).

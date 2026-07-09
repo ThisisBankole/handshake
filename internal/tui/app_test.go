@@ -227,8 +227,9 @@ func TestFullScreenDetailAndBrief(t *testing.T) {
 	h := startUI(t, newTestDB(t))
 	h.waitFor(t, "Fix port migration")
 
-	// Enter opens the full-screen detail view: metadata, the remote, the
-	// session-commits rail with the full commit block, then the summary.
+	// Enter opens the full-screen detail tree: metadata, the remote, the
+	// session-commits rail with the full commit block, the inline timeline,
+	// the summary, and the brief button at the end.
 	h.key(tcell.KeyEnter, 0)
 	h.waitFor(t, "detail · Fix port migration",
 		"github.com/ThisisBankole/handshake.git",
@@ -237,10 +238,13 @@ func TestFullScreenDetailAndBrief(t *testing.T) {
 		"Author: Bankole <bjamgbadi@gmail.com>",
 		"feat: public API docs at /docs",
 		"- Markdown-driven docs",
-		"── summary ──", "auto-detect busy port", "y restore")
+		"── timeline ──", "you  fix the stale registrations",
+		"── summary ──", "auto-detect busy port",
+		"▶ view brief", "y restore")
 
-	// r flips to the brief without going back to the list.
-	h.key(tcell.KeyRune, 'r')
+	// End lands on the brief button; Enter presses it.
+	h.key(tcell.KeyEnd, 0)
+	h.key(tcell.KeyEnter, 0)
 	h.waitFor(t, "brief · Fix port migration")
 
 	// Esc returns to the browser.

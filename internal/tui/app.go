@@ -220,7 +220,7 @@ func (u *ui) build() {
 	u.updateStatus()
 }
 
-const viewHints = "esc back · ↑↓ scroll · d detail · r brief · t timeline · y restore · h help"
+const viewHints = "esc back · ↑↓ scroll · d detail · t timeline · y restore · h help"
 
 func (u *ui) updateStatus() {
 	filter := "all agents"
@@ -265,12 +265,16 @@ func (u *ui) onKey(ev *tcell.EventKey) *tcell.EventKey {
 			u.closeView()
 		case ev.Rune() == 'd':
 			u.openView("detail", u.viewSess)
-		case ev.Rune() == 'r':
-			u.openView("brief", u.viewSess)
 		case ev.Rune() == 't':
 			u.openView("timeline", u.viewSess)
 		case ev.Rune() == 'y':
 			u.openConfirm(u.viewSess)
+		// TreeView's own Home/End only scroll; move the selection too, so
+		// End lands on the detail's brief button.
+		case ev.Key() == tcell.KeyEnd && u.tree != nil && (u.view == "detail" || u.view == "timeline"):
+			u.tree.Move(1 << 20)
+		case ev.Key() == tcell.KeyHome && u.tree != nil && (u.view == "detail" || u.view == "timeline"):
+			u.tree.Move(-(1 << 20))
 		case ev.Rune() == 'h', ev.Rune() == '?':
 			u.openHelp()
 		default:
@@ -310,10 +314,6 @@ func (u *ui) onKey(ev *tcell.EventKey) *tcell.EventKey {
 		u.startSync("")
 	case ev.Rune() == 'h', ev.Rune() == '?':
 		u.openHelp()
-	case ev.Rune() == 'r':
-		if s := u.currentSession(); s != nil {
-			u.openView("brief", s)
-		}
 	case ev.Rune() == 't':
 		if s := u.currentSession(); s != nil {
 			u.openView("timeline", s)
@@ -470,12 +470,13 @@ func (u *ui) sessionCard(s *db.Session, sel bool) []string {
 	}
 
 	// Footer: agent pill + model on the left, relative age on the right.
-	// The pill's background reset must restore the selection bar when active.
+	// The pill takes the agent's identity color as its background with dark
+	// text; its reset must restore the selection bar when active.
 	bgReset := "[-:-]"
 	if sel {
 		bgReset = "[-:#313244]"
 	}
-	left := fmt.Sprintf(" [%s:#45475a] %s %s", "#cdd6f4", tview.Escape(s.Agent), bgReset)
+	left := fmt.Sprintf(" [#11111b:#%06x] %s %s", agentColor(s.Agent).Hex(), tview.Escape(s.Agent), bgReset)
 	if s.Model != "" {
 		left += "  " + tag(colDim) + tview.Escape(s.Model) + "[-]"
 	}
@@ -632,11 +633,19 @@ func sessionDetail(s *db.Session) string {
 	return b.String()
 }
 
-// commitRail renders the stored session commits as a vertical rail: the
-// branch head first, then one node per commit (newest first) with the full
-// git-show-style block hanging off it.
+// commitRail renders the stored session commits as one string, for text
+// surfaces like the restore confirmation.
 func commitRail(st *git.State) string {
-	var b strings.Builder
+	return strings.Join(commitRailLines(st), "\n") + "\n"
+}
+
+// commitRailLines renders the stored session commits as a vertical rail: the
+// branch head first, then one node per commit (newest first) with the full
+// git-show-style block hanging off it. One string per row so tree views can
+// use the rows as nodes.
+func commitRailLines(st *git.State) []string {
+	var lines []string
+	push := func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
 	dot := tag(colGreen) + "●[-] "
 	pipe := tag(colBorder) + "│[-]  "
 
@@ -644,36 +653,36 @@ func commitRail(st *git.State) string {
 	if len(short) > 8 {
 		short = short[:8]
 	}
-	fmt.Fprintf(&b, "%s%s%s[-] @ %s%s[-]  %s\n",
+	push("%s%s%s[-] @ %s%s[-]  %s",
 		dot, tag(colAccent2), tview.Escape(st.Branch), tag(colDim), short,
 		tview.Escape(oneLine(st.Message, 44)))
 	if strings.TrimSpace(st.Status) == "" {
-		fmt.Fprintf(&b, "%s%s✓ clean[-]\n", pipe, tag(colGreen))
+		push("%s%s✓ clean[-]", pipe, tag(colGreen))
 	} else {
 		n := len(strings.Split(strings.TrimSpace(st.Status), "\n"))
-		fmt.Fprintf(&b, "%s%s● %d uncommitted change(s)[-]\n", pipe, tag(colYellow), n)
+		push("%s%s● %d uncommitted change(s)[-]", pipe, tag(colYellow), n)
 	}
 
 	// Stored oldest-first; show newest-first under the branch head.
 	for i := len(st.Commits) - 1; i >= 0; i-- {
 		c := st.Commits[i]
-		b.WriteString(pipe + "\n")
-		fmt.Fprintf(&b, "%s%scommit %s[-]\n", dot, tag(colAccent), tview.Escape(c.Hash))
+		push("%s", pipe)
+		push("%s%scommit %s[-]", dot, tag(colAccent), tview.Escape(c.Hash))
 		if c.Author != "" {
-			fmt.Fprintf(&b, "%s%sAuthor: %s[-]\n", pipe, tag(colDim), tview.Escape(c.Author))
+			push("%s%sAuthor: %s[-]", pipe, tag(colDim), tview.Escape(c.Author))
 		}
-		fmt.Fprintf(&b, "%s%sDate:   %s[-]\n", pipe, tag(colDim),
+		push("%s%sDate:   %s[-]", pipe, tag(colDim),
 			time.Unix(c.When, 0).Format("Mon Jan 2 15:04:05 2006 -0700"))
-		b.WriteString(pipe + "\n")
-		fmt.Fprintf(&b, "%s    %s%s[-]\n", pipe, tag(colText), tview.Escape(c.Subject))
+		push("%s", pipe)
+		push("%s    %s%s[-]", pipe, tag(colText), tview.Escape(c.Subject))
 		if c.Body != "" {
-			b.WriteString(pipe + "\n")
+			push("%s", pipe)
 			for _, line := range strings.Split(c.Body, "\n") {
-				fmt.Fprintf(&b, "%s    %s%s[-]\n", pipe, tag(colDim), tview.Escape(line))
+				push("%s    %s%s[-]", pipe, tag(colDim), tview.Escape(line))
 			}
 		}
 	}
-	return b.String()
+	return lines
 }
 
 // ── view layer (full-screen) ───────────────────────────────────────────────
@@ -690,8 +699,8 @@ func (u *ui) openView(kind string, s *db.Session) {
 	focus := tview.Primitive(u.viewReader.text)
 	switch kind {
 	case "detail":
-		u.viewReader.show("detail · "+tview.Escape(oneLine(s.Title, 60)), sessionDetail(s), viewHints)
-		prim = u.viewReader.root
+		prim = u.detailTree(s)
+		focus = u.tree
 	case "brief":
 		brief, err := engine.NewBriefGenerator(u.db).GenerateBrief(s.ID)
 		body := ""
@@ -758,7 +767,7 @@ func (u *ui) openSub(kind, title, body, hints string) {
 func (u *ui) closeSub() {
 	u.pages.RemovePage("sub")
 	u.sub = ""
-	if u.view == "timeline" && u.tree != nil {
+	if (u.view == "timeline" || u.view == "detail") && u.tree != nil {
 		u.app.SetFocus(u.tree)
 	} else if u.view != "" {
 		u.app.SetFocus(u.viewReader.text)
@@ -1049,7 +1058,6 @@ func helpText() string {
 
 	section("browser")
 	key("enter", "open the selected session")
-	key("r", "handoff brief")
 	key("t", "session timeline")
 	key("/", "focus the command box")
 	key("a", "cycle the agent filter")
@@ -1068,11 +1076,11 @@ func helpText() string {
 		fmt.Fprintf(&b, "  %s%-17s[-] %s%s[-]\n", tag(colAccent2), label, tag(colText), c.desc)
 	}
 
-	section("full-screen view")
-	key("↑ ↓", "scroll")
+	section("session detail")
+	key("↑ ↓", "move through metadata, commits, and timeline")
+	key("enter", "fold a chapter · open an event · press ▶ view brief")
 	key("d", "session detail")
-	key("r", "handoff brief")
-	key("t", "session timeline")
+	key("t", "full-screen timeline")
 	key("y", "restore this session (asks to confirm)")
 	key("esc", "back one layer")
 
