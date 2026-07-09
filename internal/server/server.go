@@ -196,6 +196,12 @@ func (s *Server) handleCheckpointSession(request mcp.CallToolRequest) (*mcp.Call
 	// Silently skipped if the directory has no git repo or git isn't installed.
 	if sessionData.WorkingDir != "" {
 		if state, err := git.CaptureState(sessionData.WorkingDir); err == nil && state != nil {
+			// Store the commits made during the session so they survive
+			// rebases, repo moves, and browsing from another machine.
+			if sessionData.CreatedAt > 0 {
+				state.Commits = git.CommitsBetween(sessionData.WorkingDir,
+					sessionData.CreatedAt-300, sessionData.UpdatedAt+300)
+			}
 			encoded, jsonErr := json.Marshal(state)
 			if jsonErr == nil {
 				sessionData.GitState = string(encoded)

@@ -12,11 +12,13 @@ import (
 
 // State holds a snapshot of a git repository at checkpoint time.
 type State struct {
-	Commit     string `json:"commit"`      // full commit hash
-	Branch     string `json:"branch"`      // current branch name
-	Message    string `json:"message"`     // last commit message
-	Status     string `json:"status"`      // git status --short output
-	CapturedAt int64  `json:"captured_at"` // unix timestamp
+	Commit     string   `json:"commit"`            // full commit hash
+	Branch     string   `json:"branch"`            // current branch name
+	Message    string   `json:"message"`           // last commit message
+	Status     string   `json:"status"`            // git status --short output
+	Remote     string   `json:"remote,omitempty"`  // remote.origin.url
+	Commits    []Commit `json:"commits,omitempty"` // commits made during the session
+	CapturedAt int64    `json:"captured_at"`       // unix timestamp
 }
 
 // CaptureState runs git commands in workingDir and returns the current
@@ -53,6 +55,12 @@ func CaptureState(workingDir string) (*State, error) {
 	// Empty string means clean working tree.
 	if out, err := rawOutput(workingDir, "status", "--short"); err == nil {
 		state.Status = out
+	}
+
+	// Remote URL, so the session record points at the repo even when the
+	// working directory no longer exists on the machine viewing it.
+	if out, err := output(workingDir, "config", "--get", "remote.origin.url"); err == nil {
+		state.Remote = out
 	}
 
 	return state, nil
@@ -239,9 +247,11 @@ func parseStatusLines(status string) map[string]string {
 
 // Commit is a single commit that landed during a session's time window.
 type Commit struct {
-	Hash    string // abbreviated hash
-	Subject string
-	When    int64 // author time, unix
+	Hash    string `json:"hash"` // abbreviated hash
+	Subject string `json:"subject"`
+	Author  string `json:"author,omitempty"` // "Name <email>"
+	Body    string `json:"body,omitempty"`   // message body below the subject
+	When    int64  `json:"when"`             // author time, unix
 }
 
 // CommitsBetween returns commits reachable from HEAD whose author time falls
@@ -257,19 +267,20 @@ func CommitsBetween(workingDir string, from, to int64) []Commit {
 	}
 
 	// --since/--until filter server-side; timestamps are still checked in Go
-	// because git's date parsing is fuzzy at the boundaries.
+	// because git's date parsing is fuzzy at the boundaries. Records are
+	// separated by \x1e and fields by \x1f so multi-line bodies parse cleanly.
 	out, err := rawOutput(workingDir, "log",
 		"--since="+time.Unix(from, 0).Format(time.RFC3339),
 		"--until="+time.Unix(to, 0).Format(time.RFC3339),
-		"--format=%h%x09%at%x09%s")
+		"--format=%x1e%h%x1f%at%x1f%an <%ae>%x1f%s%x1f%b")
 	if err != nil || out == "" {
 		return nil
 	}
 
 	var commits []Commit
-	for _, line := range strings.Split(out, "\n") {
-		parts := strings.SplitN(line, "\t", 3)
-		if len(parts) != 3 {
+	for _, record := range strings.Split(out, "\x1e") {
+		parts := strings.SplitN(record, "\x1f", 5)
+		if len(parts) != 5 {
 			continue
 		}
 		var at int64
@@ -278,7 +289,13 @@ func CommitsBetween(workingDir string, from, to int64) []Commit {
 			continue
 		}
 		// git log is newest first; prepend to end up oldest first.
-		commits = append([]Commit{{Hash: parts[0], Subject: parts[2], When: at}}, commits...)
+		commits = append([]Commit{{
+			Hash:    strings.TrimSpace(parts[0]),
+			When:    at,
+			Author:  parts[2],
+			Subject: parts[3],
+			Body:    strings.TrimSpace(parts[4]),
+		}}, commits...)
 	}
 	return commits
 }

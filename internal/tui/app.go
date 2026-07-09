@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -44,11 +45,15 @@ type ui struct {
 	subReader  *reader
 	tree       *tview.TreeView
 
-	pages   *tview.Pages
-	list    *tview.List
-	preview *tview.TextView
-	status  *tview.TextView
-	input   *tview.InputField // command box under the header: / commands or search
+	pages  *tview.Pages
+	cards  *tview.TextView // single centered column of session (or result) cards
+	status *tview.TextView
+	input  *tview.InputField // command box under the header: / commands or search
+
+	selIdx     int   // card the selection bar is on
+	cardW      int   // inner width of the cards panel at last render
+	cardStarts []int // first text row of each card, for scroll-into-view
+	cardEnds   []int // last text row of each card
 
 	restore *db.Session // set when the user confirms a restore
 }
@@ -80,7 +85,7 @@ func newUI(database *db.Database, homeDir string) (*ui, error) {
 	}
 	u.refreshAgents()
 	u.build()
-	u.renderList()
+	u.renderCards()
 	return u, nil
 }
 
@@ -133,25 +138,28 @@ func (u *ui) loadSessions() error {
 }
 
 func (u *ui) build() {
-	u.list = tview.NewList()
-	u.list.ShowSecondaryText(true).
-		SetSecondaryTextColor(colFaint).
-		SetSelectedStyle(tcell.StyleDefault.Foreground(colAccent).Background(colSurface).Bold(true)).
-		SetHighlightFullLine(true).
-		SetChangedFunc(func(i int, _, _ string, _ rune) { u.updatePreview(i) }).
-		SetSelectedFunc(func(i int, _, _ string, _ rune) { u.onEnter(i) })
-	u.list.SetBorder(true).
-		SetTitle(" sessions ").
-		SetTitleAlign(tview.AlignLeft).
-		SetBorderColor(colAccent).
-		SetBorderPadding(1, 1, 1, 1)
-
-	u.preview = tview.NewTextView()
-	u.preview.SetDynamicColors(true).SetWordWrap(true)
-	u.preview.SetBorder(true).
-		SetTitle(" preview ").
-		SetTitleAlign(tview.AlignLeft).
+	u.cardW = 76
+	u.cards = tview.NewTextView()
+	u.cards.SetDynamicColors(true).SetWrap(false)
+	u.cards.SetBorder(true).
+		SetTitle(" s e s s i o n s ").
+		SetTitleAlign(tview.AlignCenter).
+		SetBorderColor(colBorder).
 		SetBorderPadding(1, 1, 2, 2)
+	focusColors(u.cards.Box)
+
+	// Cards pad the selection bar to the panel's inner width, which is only
+	// known after layout — re-render when it settles or the terminal resizes.
+	u.app.SetAfterDrawFunc(func(_ tcell.Screen) {
+		_, _, w, _ := u.cards.GetInnerRect()
+		if w > 0 && w != u.cardW {
+			u.cardW = w
+			go u.app.QueueUpdateDraw(func() {
+				u.renderCards()
+				u.scrollToSelected()
+			})
+		}
+	})
 
 	title := tview.NewTextView()
 	title.SetDynamicColors(true).
@@ -192,9 +200,12 @@ func (u *ui) build() {
 		SetBorderColor(colBorder)
 	focusColors(u.input.Box)
 
+	// The card column sits centered with breathing room on both sides,
+	// like the reader views.
 	body := tview.NewFlex().
-		AddItem(u.list, 0, 2, true).
-		AddItem(u.preview, 0, 3, false)
+		AddItem(tview.NewBox(), 0, 1, false).
+		AddItem(u.cards, 0, 5, true).
+		AddItem(tview.NewBox(), 0, 1, false)
 	root := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(header, 1, 0, false).
 		AddItem(u.input, 3, 0, false).
@@ -273,9 +284,24 @@ func (u *ui) onKey(ev *tcell.EventKey) *tcell.EventKey {
 	case ev.Key() == tcell.KeyEscape:
 		if u.inResults {
 			u.inResults = false
-			u.renderList()
-			u.updatePreview(u.list.GetCurrentItem())
+			u.selIdx = 0
+			u.renderCards()
+			u.cards.ScrollToBeginning()
 		}
+	case ev.Key() == tcell.KeyUp, ev.Rune() == 'k':
+		u.moveSel(-1)
+	case ev.Key() == tcell.KeyDown, ev.Rune() == 'j':
+		u.moveSel(1)
+	case ev.Key() == tcell.KeyPgUp:
+		u.moveSel(-3)
+	case ev.Key() == tcell.KeyPgDn:
+		u.moveSel(3)
+	case ev.Key() == tcell.KeyHome:
+		u.setSel(0)
+	case ev.Key() == tcell.KeyEnd:
+		u.setSel(u.cardCount() - 1)
+	case ev.Key() == tcell.KeyEnter:
+		u.onEnter(u.selIdx)
 	case ev.Rune() == '/':
 		u.openInput()
 	case ev.Rune() == 'a':
@@ -298,57 +324,224 @@ func (u *ui) onKey(ev *tcell.EventKey) *tcell.EventKey {
 	return nil
 }
 
-// ── browser: list + preview ────────────────────────────────────────────────
+// ── browser: card column ───────────────────────────────────────────────────
 
-func (u *ui) renderList() {
-	u.list.Clear()
+func (u *ui) cardCount() int {
 	if u.inResults {
-		u.list.SetTitle(fmt.Sprintf(" results · %s ", u.lastQuery))
-		for _, r := range u.results {
-			meta := fmt.Sprintf("%s%s[-] · %s · %s",
-				tag(agentColor(r.SessionAgent)), r.SessionAgent, oneLine(r.SessionTitle, 30), relTime(r.CreatedAt))
-			u.list.AddItem(oneLine(r.Content, 64), meta, 0, nil)
-		}
-		if len(u.results) == 0 {
-			u.preview.SetText(fmt.Sprintf("\n%sNo matches for %s%q[-]",
-				tag(colDim), tag(colYellow), u.lastQuery))
-		}
+		return len(u.results)
+	}
+	return len(u.sessions)
+}
+
+func (u *ui) setSel(i int) {
+	n := u.cardCount()
+	if n == 0 {
 		return
 	}
-	u.list.SetTitle(" sessions ")
-	for _, s := range u.sessions {
-		meta := fmt.Sprintf("%s%s[-] · %s", tag(agentColor(s.Agent)), s.Agent, relTime(s.UpdatedAt))
-		u.list.AddItem(s.Title, meta, 0, nil)
+	if i < 0 {
+		i = 0
 	}
-	if len(u.sessions) == 0 {
-		u.preview.SetText(fmt.Sprintf("\n%sNo sessions yet.\n\nRun a coding agent and checkpoint a session,\nthen come back here to browse and restore it.", tag(colDim)))
+	if i >= n {
+		i = n - 1
+	}
+	if i == u.selIdx {
+		return
+	}
+	u.selIdx = i
+	u.renderCards()
+	u.scrollToSelected()
+}
+
+func (u *ui) moveSel(delta int) { u.setSel(u.selIdx + delta) }
+
+// scrollToSelected nudges the panel so the selected card is fully visible.
+func (u *ui) scrollToSelected() {
+	if u.selIdx < 0 || u.selIdx >= len(u.cardStarts) {
+		return
+	}
+	_, _, _, h := u.cards.GetInnerRect()
+	if h <= 0 {
+		return
+	}
+	top, _ := u.cards.GetScrollOffset()
+	start, end := u.cardStarts[u.selIdx], u.cardEnds[u.selIdx]
+	switch {
+	case end-start+1 >= h, start < top:
+		u.cards.ScrollTo(start, 0)
+	case end >= top+h:
+		u.cards.ScrollTo(end-h+1, 0)
 	}
 }
 
-func (u *ui) updatePreview(i int) {
+// renderCards redraws the whole card column, painting the selected card on
+// the surface background.
+func (u *ui) renderCards() {
+	if u.selIdx >= u.cardCount() {
+		u.selIdx = 0
+	}
 	if u.inResults {
-		if i < 0 || i >= len(u.results) {
-			return
+		u.cards.SetTitle(fmt.Sprintf(" results · %s ", tview.Escape(u.lastQuery)))
+	} else {
+		u.cards.SetTitle(" s e s s i o n s ")
+	}
+
+	var b strings.Builder
+	u.cardStarts = u.cardStarts[:0]
+	u.cardEnds = u.cardEnds[:0]
+	row := 0
+	add := func(lines []string) {
+		u.cardStarts = append(u.cardStarts, row)
+		for _, l := range lines {
+			b.WriteString(l + "\n")
+			row++
 		}
-		r := u.results[i]
-		var b strings.Builder
-		fmt.Fprintf(&b, "[::b]%s[::-]\n\n", tview.Escape(r.SessionTitle))
-		fmt.Fprintf(&b, "%s● [-]%s%s[-]  %s%s · %s[-]\n\n",
-			tag(agentColor(r.SessionAgent)), tag(colText), r.SessionAgent, tag(colFaint), r.Role, relTime(r.CreatedAt))
-		fmt.Fprintf(&b, "%s%s", tag(colText), tview.Escape(r.Content))
-		u.preview.SetTitle(" match ")
-		u.preview.SetText(b.String()).ScrollToBeginning()
-		return
+		u.cardEnds = append(u.cardEnds, row-1)
 	}
-	if i < 0 || i >= len(u.sessions) {
-		return
+
+	if u.inResults {
+		for i, r := range u.results {
+			add(u.resultCard(r, i == u.selIdx))
+		}
+		if len(u.results) == 0 {
+			fmt.Fprintf(&b, "\n%s No matches for %s%s[-]",
+				tag(colDim), tag(colYellow), tview.Escape(u.lastQuery))
+		}
+	} else {
+		for i, s := range u.sessions {
+			add(u.sessionCard(s, i == u.selIdx))
+		}
+		if len(u.sessions) == 0 {
+			fmt.Fprintf(&b, "\n%s No sessions yet. Run a coding agent, then checkpoint or /pull.[-]", tag(colDim))
+		}
 	}
-	u.preview.SetTitle(" preview ")
-	u.preview.SetText(sessionDetail(u.sessions[i])).ScrollToBeginning()
+	u.cards.SetText(strings.TrimRight(b.String(), "\n"))
+}
+
+// selectCard paints a block of card lines onto the surface background and
+// pads each line so the bar spans the panel.
+func (u *ui) selectCard(lines []string) []string {
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		if pad := u.cardW - tview.TaggedStringWidth(l); pad > 0 {
+			l += strings.Repeat(" ", pad)
+		}
+		out[i] = "[:#313244]" + l + "[:-]"
+	}
+	return out
+}
+
+// sessionCard renders one session as a multi-line card.
+func (u *ui) sessionCard(s *db.Session, sel bool) []string {
+	w := u.cardW
+	if w < 40 {
+		w = 40
+	}
+	var lines []string
+	push := func(l string) { lines = append(lines, l) }
+
+	push("")
+	for _, t := range wrapText(s.Title, w-4) {
+		push(" " + tag(colText) + "[::b]" + tview.Escape(t) + "[::-]")
+	}
+	if s.WorkingDir != "" {
+		push("")
+		push(" " + tag(colFaint) + "dir[-]      " + tag(colDim) + tview.Escape(s.WorkingDir) + "[-]")
+	}
+
+	if s.GitState != "" {
+		var st git.State
+		if json.Unmarshal([]byte(s.GitState), &st) == nil && st.Commit != "" {
+			push("")
+			push(" " + tag(colFaint) + "── git ──[-]")
+			short := st.Commit
+			if len(short) > 8 {
+				short = short[:8]
+			}
+			push(fmt.Sprintf(" %s%s[-] @ %s%s[-] %s%s[-]",
+				tag(colAccent2), tview.Escape(st.Branch), tag(colDim), short,
+				tag(colText), tview.Escape(oneLine(st.Message, w-20))))
+			if strings.TrimSpace(st.Status) == "" {
+				push(" " + tag(colGreen) + "✓ clean[-]")
+			} else {
+				n := len(strings.Split(strings.TrimSpace(st.Status), "\n"))
+				push(fmt.Sprintf(" %s● %d uncommitted change(s)[-]", tag(colYellow), n))
+			}
+		}
+	}
+
+	// Footer: agent pill + model on the left, relative age on the right.
+	// The pill's background reset must restore the selection bar when active.
+	bgReset := "[-:-]"
+	if sel {
+		bgReset = "[-:#313244]"
+	}
+	left := fmt.Sprintf(" [%s:#45475a] %s %s", "#cdd6f4", tview.Escape(s.Agent), bgReset)
+	if s.Model != "" {
+		left += "  " + tag(colDim) + tview.Escape(s.Model) + "[-]"
+	}
+	right := tag(colDim) + relTime(s.UpdatedAt) + "[-] "
+	pad := w - tview.TaggedStringWidth(left) - tview.TaggedStringWidth(right)
+	if pad < 1 {
+		pad = 1
+	}
+	push("")
+	push(left + strings.Repeat(" ", pad) + right)
+
+	if sel {
+		lines = u.selectCard(lines)
+	}
+	// Separator rule between cards, outside the selection bar.
+	lines = append(lines, "", " "+tag(colBorder)+strings.Repeat("─", max(w-2, 10))+"[-]")
+	return lines
+}
+
+// resultCard renders one search hit as a compact card.
+func (u *ui) resultCard(r *db.SearchResult, sel bool) []string {
+	w := u.cardW
+	if w < 40 {
+		w = 40
+	}
+	lines := []string{
+		"",
+		" " + tag(colText) + tview.Escape(oneLine(r.Content, w-4)) + "[-]",
+		fmt.Sprintf(" %s%s[-] %s· %s · %s · %s[-]",
+			tag(agentColor(r.SessionAgent)), tview.Escape(r.SessionAgent), tag(colFaint),
+			tview.Escape(oneLine(r.SessionTitle, 36)), r.Role, relTime(r.CreatedAt)),
+	}
+	if sel {
+		lines = u.selectCard(lines)
+	}
+	return append(lines, "", " "+tag(colBorder)+strings.Repeat("─", max(w-2, 10))+"[-]")
+}
+
+// wrapText word-wraps s to lines at most w runes wide.
+func wrapText(s string, w int) []string {
+	words := strings.Fields(s)
+	if len(words) == 0 {
+		return []string{"untitled"}
+	}
+	var lines []string
+	cur := words[0]
+	for _, word := range words[1:] {
+		if len([]rune(cur))+1+len([]rune(word)) <= w {
+			cur += " " + word
+		} else {
+			lines = append(lines, cur)
+			cur = word
+		}
+	}
+	return append(lines, cur)
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (u *ui) currentSession() *db.Session {
-	i := u.list.GetCurrentItem()
+	i := u.selIdx
 	if u.inResults {
 		if i < 0 || i >= len(u.results) {
 			return nil
@@ -399,18 +592,26 @@ func sessionDetail(s *db.Session) string {
 	if s.GitState != "" {
 		var st git.State
 		if err := json.Unmarshal([]byte(s.GitState), &st); err == nil {
-			section("git")
-			short := st.Commit
-			if len(short) > 8 {
-				short = short[:8]
+			if st.Remote != "" {
+				fmt.Fprintf(&b, "%sremote[-]   %s%s[-]\n", tag(colFaint), tag(colDim), tview.Escape(st.Remote))
 			}
-			fmt.Fprintf(&b, "%s%s[-] @ %s%s[-]  %s\n",
-				tag(colAccent2), st.Branch, tag(colDim), short, oneLine(st.Message, 48))
-			if strings.TrimSpace(st.Status) == "" {
-				fmt.Fprintf(&b, "%s✓ clean[-]\n", tag(colGreen))
+			if len(st.Commits) > 0 {
+				section("session commits")
+				b.WriteString(commitRail(&st))
 			} else {
-				n := len(strings.Split(strings.TrimSpace(st.Status), "\n"))
-				fmt.Fprintf(&b, "%s● %d uncommitted change(s)[-]\n", tag(colYellow), n)
+				section("git")
+				short := st.Commit
+				if len(short) > 8 {
+					short = short[:8]
+				}
+				fmt.Fprintf(&b, "%s%s[-] @ %s%s[-]  %s\n",
+					tag(colAccent2), st.Branch, tag(colDim), short, oneLine(st.Message, 48))
+				if strings.TrimSpace(st.Status) == "" {
+					fmt.Fprintf(&b, "%s✓ clean[-]\n", tag(colGreen))
+				} else {
+					n := len(strings.Split(strings.TrimSpace(st.Status), "\n"))
+					fmt.Fprintf(&b, "%s● %d uncommitted change(s)[-]\n", tag(colYellow), n)
+				}
 			}
 		}
 	}
@@ -426,6 +627,50 @@ func sessionDetail(s *db.Session) string {
 		section("decisions")
 		for _, line := range strings.Split(strings.TrimSpace(s.Decisions), "\n") {
 			fmt.Fprintf(&b, "%s·[-] %s\n", tag(colAccent), tview.Escape(strings.TrimSpace(line)))
+		}
+	}
+	return b.String()
+}
+
+// commitRail renders the stored session commits as a vertical rail: the
+// branch head first, then one node per commit (newest first) with the full
+// git-show-style block hanging off it.
+func commitRail(st *git.State) string {
+	var b strings.Builder
+	dot := tag(colGreen) + "●[-] "
+	pipe := tag(colBorder) + "│[-]  "
+
+	short := st.Commit
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	fmt.Fprintf(&b, "%s%s%s[-] @ %s%s[-]  %s\n",
+		dot, tag(colAccent2), tview.Escape(st.Branch), tag(colDim), short,
+		tview.Escape(oneLine(st.Message, 44)))
+	if strings.TrimSpace(st.Status) == "" {
+		fmt.Fprintf(&b, "%s%s✓ clean[-]\n", pipe, tag(colGreen))
+	} else {
+		n := len(strings.Split(strings.TrimSpace(st.Status), "\n"))
+		fmt.Fprintf(&b, "%s%s● %d uncommitted change(s)[-]\n", pipe, tag(colYellow), n)
+	}
+
+	// Stored oldest-first; show newest-first under the branch head.
+	for i := len(st.Commits) - 1; i >= 0; i-- {
+		c := st.Commits[i]
+		b.WriteString(pipe + "\n")
+		fmt.Fprintf(&b, "%s%scommit %s[-]\n", dot, tag(colAccent), tview.Escape(c.Hash))
+		if c.Author != "" {
+			fmt.Fprintf(&b, "%s%sAuthor: %s[-]\n", pipe, tag(colDim), tview.Escape(c.Author))
+		}
+		fmt.Fprintf(&b, "%s%sDate:   %s[-]\n", pipe, tag(colDim),
+			time.Unix(c.When, 0).Format("Mon Jan 2 15:04:05 2006 -0700"))
+		b.WriteString(pipe + "\n")
+		fmt.Fprintf(&b, "%s    %s%s[-]\n", pipe, tag(colText), tview.Escape(c.Subject))
+		if c.Body != "" {
+			b.WriteString(pipe + "\n")
+			for _, line := range strings.Split(c.Body, "\n") {
+				fmt.Fprintf(&b, "%s    %s%s[-]\n", pipe, tag(colDim), tview.Escape(line))
+			}
 		}
 	}
 	return b.String()
@@ -497,7 +742,7 @@ func (u *ui) closeView() {
 	u.pages.RemovePage("view")
 	u.view = ""
 	u.viewSess = nil
-	u.app.SetFocus(u.list)
+	u.app.SetFocus(u.cards)
 }
 
 // ── sub layer (full-screen, above a view) ──────────────────────────────────
@@ -518,7 +763,7 @@ func (u *ui) closeSub() {
 	} else if u.view != "" {
 		u.app.SetFocus(u.viewReader.text)
 	} else {
-		u.app.SetFocus(u.list)
+		u.app.SetFocus(u.cards)
 	}
 }
 
@@ -597,7 +842,7 @@ func (u *ui) openInput() {
 
 func (u *ui) closeInput() {
 	u.input.SetText("")
-	u.app.SetFocus(u.list)
+	u.app.SetFocus(u.cards)
 }
 
 // completeCommand feeds the dropdown while the box holds a bare "/…" word.
@@ -657,14 +902,13 @@ func (u *ui) runSearch(query string) {
 	}
 	results, err := u.db.SearchAllMessages(query, 50, u.agentFilter())
 	if err != nil {
-		u.preview.SetText(fmt.Sprintf("\n%sSearch failed:[-] %s", tag(colRed), tview.Escape(err.Error())))
+		u.status.SetText(tag(colRed) + "search failed: " + tview.Escape(err.Error()) + " ")
 		return
 	}
 	u.results, u.lastQuery, u.inResults = results, query, true
-	u.renderList()
-	if len(results) > 0 {
-		u.updatePreview(0)
-	}
+	u.selIdx = 0
+	u.renderCards()
+	u.cards.ScrollToBeginning()
 }
 
 // ── agent filter ───────────────────────────────────────────────────────────
@@ -706,13 +950,14 @@ func (u *ui) setAgentFilter(name string) {
 // browser back in session mode.
 func (u *ui) reloadList() {
 	if err := u.loadSessions(); err != nil {
-		u.preview.SetText(fmt.Sprintf("\n%sFailed to load sessions:[-] %s", tag(colRed), tview.Escape(err.Error())))
+		u.status.SetText(tag(colRed) + "failed to load sessions: " + tview.Escape(err.Error()) + " ")
 		return
 	}
 	u.inResults = false
+	u.selIdx = 0
 	u.updateStatus()
-	u.renderList()
-	u.updatePreview(u.list.GetCurrentItem())
+	u.renderCards()
+	u.cards.ScrollToBeginning()
 }
 
 // ── pull ───────────────────────────────────────────────────────────────────
@@ -747,8 +992,8 @@ func (u *ui) startSync(agent string) {
 				return
 			}
 			u.inResults = false
-			u.renderList()
-			u.updatePreview(u.list.GetCurrentItem())
+			u.renderCards()
+			u.scrollToSelected()
 			u.status.SetText(syncSummary(results))
 		})
 	}()

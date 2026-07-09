@@ -119,6 +119,10 @@ func (s *Server) enrichIngestedSession(session *adapters.SessionData) {
 	if err != nil || state == nil {
 		return
 	}
+	if session.CreatedAt > 0 {
+		state.Commits = git.CommitsBetween(session.WorkingDir,
+			session.CreatedAt-300, session.UpdatedAt+300)
+	}
 	encoded, err := json.Marshal(state)
 	if err == nil {
 		session.GitState = string(encoded)

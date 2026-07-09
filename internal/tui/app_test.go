@@ -29,6 +29,14 @@ func newTestDB(t *testing.T) *db.Database {
 		Branch:  "main",
 		Message: "Kill stale serve processes",
 		Status:  " M cmd/handshake/main.go",
+		Remote:  "https://github.com/ThisisBankole/handshake.git",
+		Commits: []git.Commit{{
+			Hash:    "5b8f0e3",
+			Subject: "feat: public API docs at /docs",
+			Author:  "Bankole <bjamgbadi@gmail.com>",
+			Body:    "- Markdown-driven docs\n- Live coverage page",
+			When:    time.Now().Unix() - 900,
+		}},
 	})
 	now := time.Now().Unix()
 	sessions := []*db.Session{
@@ -171,22 +179,34 @@ func (h *harness) key(k tcell.Key, r rune) {
 	time.Sleep(30 * time.Millisecond)
 }
 
-func TestBrowserRendersSessionsAndPreview(t *testing.T) {
+func TestBrowserRendersCards(t *testing.T) {
 	h := startUI(t, newTestDB(t))
 
-	// Header, both sessions with agent labels, and the preview pane for the
-	// most recent session (including git state and decisions).
+	// Both sessions render as cards: title, git line, footer with agent
+	// pill, model, and relative age.
 	h.waitFor(t,
-		"Fix port migration", "claude-code",
-		"Session search", "codex",
+		"s e s s i o n s",
+		"Fix port migration", "claude-code", "fable-5",
 		"main @ 24aace8b",
 		"1 uncommitted change",
-		"auto-detect busy port",
+		"Session search", "codex",
 	)
 
-	// Moving down previews the second session, which has no summary.
+	// The selected card paints a surface-background bar.
+	cells, _, _ := h.sim.GetContents()
+	surface := 0
+	for _, c := range cells {
+		if _, bg, _ := c.Style.Decompose(); bg == colSurface {
+			surface++
+		}
+	}
+	if surface == 0 {
+		t.Error("no cells use the surface background — selection bar missing")
+	}
+
+	// Selection moves without losing the cards.
 	h.key(tcell.KeyDown, 0)
-	h.waitFor(t, "no summary recorded")
+	h.waitFor(t, "Session search")
 }
 
 func TestBrowserAgentFilter(t *testing.T) {
@@ -207,9 +227,17 @@ func TestFullScreenDetailAndBrief(t *testing.T) {
 	h := startUI(t, newTestDB(t))
 	h.waitFor(t, "Fix port migration")
 
-	// Enter opens the full-screen detail view.
+	// Enter opens the full-screen detail view: metadata, the remote, the
+	// session-commits rail with the full commit block, then the summary.
 	h.key(tcell.KeyEnter, 0)
-	h.waitFor(t, "detail · Fix port migration", "── summary ──", "y restore")
+	h.waitFor(t, "detail · Fix port migration",
+		"github.com/ThisisBankole/handshake.git",
+		"── session commits ──",
+		"1 uncommitted change", "commit 5b8f0e3",
+		"Author: Bankole <bjamgbadi@gmail.com>",
+		"feat: public API docs at /docs",
+		"- Markdown-driven docs",
+		"── summary ──", "auto-detect busy port", "y restore")
 
 	// r flips to the brief without going back to the list.
 	h.key(tcell.KeyRune, 'r')
@@ -217,7 +245,7 @@ func TestFullScreenDetailAndBrief(t *testing.T) {
 
 	// Esc returns to the browser.
 	h.key(tcell.KeyEscape, 0)
-	h.waitFor(t, " sessions ")
+	h.waitFor(t, "s e s s i o n s")
 	h.waitGone(t, "brief · Fix port migration")
 }
 
@@ -266,7 +294,7 @@ func TestTimelineView(t *testing.T) {
 	h.key(tcell.KeyEscape, 0)
 	h.waitFor(t, "timeline · Fix port migration")
 	h.key(tcell.KeyEscape, 0)
-	h.waitFor(t, " sessions ")
+	h.waitFor(t, "s e s s i o n s")
 }
 
 func TestBrowserSearch(t *testing.T) {
@@ -288,7 +316,7 @@ func TestBrowserSearch(t *testing.T) {
 	h.key(tcell.KeyEscape, 0)
 	h.waitFor(t, "results · migrated")
 	h.key(tcell.KeyEscape, 0)
-	h.waitFor(t, " sessions ")
+	h.waitFor(t, "s e s s i o n s")
 }
 
 func TestCommandBox(t *testing.T) {
@@ -330,7 +358,7 @@ func TestCommandBox(t *testing.T) {
 	h.key(tcell.KeyEnter, 0)
 	h.waitFor(t, "── command box ──")
 	h.key(tcell.KeyEscape, 0)
-	h.waitFor(t, " sessions ")
+	h.waitFor(t, "s e s s i o n s")
 
 	// Unknown commands report in the status bar instead of doing nothing.
 	h.key(tcell.KeyRune, '/')
@@ -352,7 +380,7 @@ func TestHelpOverlay(t *testing.T) {
 	// Esc closes it back to the browser.
 	h.key(tcell.KeyEscape, 0)
 	h.waitGone(t, "pull sessions from agent storage")
-	h.waitFor(t, " sessions ")
+	h.waitFor(t, "s e s s i o n s")
 
 	// ? opens it from a full-screen view too, and esc backs out one layer.
 	h.key(tcell.KeyEnter, 0)
