@@ -75,7 +75,7 @@ type harness struct {
 
 func startUI(t *testing.T, database *db.Database) *harness {
 	t.Helper()
-	u, err := newUI(database)
+	u, err := newUI(database, t.TempDir())
 	if err != nil {
 		t.Fatalf("newUI: %v", err)
 	}
@@ -91,7 +91,7 @@ func startUI(t *testing.T, database *db.Database) *harness {
 	// views fit. SetSize does not deliver a resize event, so force a
 	// re-layout with a queued draw.
 	h.waitFor(t, "handshake")
-	sim.SetSize(100, 44)
+	sim.SetSize(100, 60)
 	u.app.QueueUpdateDraw(func() {})
 	return h
 }
@@ -289,6 +289,88 @@ func TestBrowserSearch(t *testing.T) {
 	h.waitFor(t, "results · migrated")
 	h.key(tcell.KeyEscape, 0)
 	h.waitFor(t, " sessions ")
+}
+
+func TestCommandBox(t *testing.T) {
+	h := startUI(t, newTestDB(t))
+
+	// The box sits at the top with its placeholder visible.
+	h.waitFor(t, "type / for commands")
+	lines := strings.Split(h.screenText(), "\n")
+	row := -1
+	for i, line := range lines {
+		if strings.Contains(line, "type / for commands") {
+			row = i
+			break
+		}
+	}
+	if row < 0 || row > 3 {
+		t.Fatalf("command box on row %d, expected near the top", row)
+	}
+
+	// / focuses the box; typing / drops down the command list.
+	h.key(tcell.KeyRune, '/')
+	h.key(tcell.KeyRune, '/')
+	h.waitFor(t, "/pull <agent>", "/help", "/search <query>")
+
+	// Narrow to /pull, select it (fills the box, waits for the argument),
+	// then run it against the empty test home.
+	for _, r := range "pull" {
+		h.key(tcell.KeyRune, r)
+	}
+	h.key(tcell.KeyEnter, 0) // select from dropdown → "/pull "
+	h.key(tcell.KeyEnter, 0) // execute
+	h.waitFor(t, "pull: nothing new")
+
+	// A command without arguments runs straight from the dropdown.
+	h.key(tcell.KeyRune, '/')
+	for _, r := range "/help" {
+		h.key(tcell.KeyRune, r)
+	}
+	h.key(tcell.KeyEnter, 0)
+	h.waitFor(t, "── command box ──")
+	h.key(tcell.KeyEscape, 0)
+	h.waitFor(t, " sessions ")
+
+	// Unknown commands report in the status bar instead of doing nothing.
+	h.key(tcell.KeyRune, '/')
+	for _, r := range "/nope" {
+		h.key(tcell.KeyRune, r)
+	}
+	h.key(tcell.KeyEnter, 0)
+	h.waitFor(t, "unknown command /nope")
+}
+
+func TestHelpOverlay(t *testing.T) {
+	h := startUI(t, newTestDB(t))
+	h.waitFor(t, "Fix port migration")
+
+	// h opens the help overlay from the browser.
+	h.key(tcell.KeyRune, 'h')
+	h.waitFor(t, "pull sessions from agent storage", "restore & print the handoff brief", "handshake pull [agent]")
+
+	// Esc closes it back to the browser.
+	h.key(tcell.KeyEscape, 0)
+	h.waitGone(t, "pull sessions from agent storage")
+	h.waitFor(t, " sessions ")
+
+	// ? opens it from a full-screen view too, and esc backs out one layer.
+	h.key(tcell.KeyEnter, 0)
+	h.waitFor(t, "detail · Fix port migration")
+	h.key(tcell.KeyRune, '?')
+	h.waitFor(t, "pull sessions from agent storage")
+	h.key(tcell.KeyEscape, 0)
+	h.waitFor(t, "detail · Fix port migration")
+}
+
+func TestPullKey(t *testing.T) {
+	h := startUI(t, newTestDB(t))
+	h.waitFor(t, "Fix port migration")
+
+	// The test homeDir has no agent storage, so a pull finds nothing new;
+	// the status bar reports the outcome and the list survives the reload.
+	h.key(tcell.KeyRune, 's')
+	h.waitFor(t, "pull: nothing new", "Fix port migration")
 }
 
 func TestRestoreFlow(t *testing.T) {

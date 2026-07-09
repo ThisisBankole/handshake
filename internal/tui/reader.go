@@ -50,5 +50,5 @@ func (r *reader) show(title, body, hints string) {
 	r.title.SetText("\n" + tag(colAccent) + title + "[-]")
 	r.text.SetText(body)
 	r.text.ScrollToBeginning()
-	r.hints.SetText(tag(colFaint) + hints)
+	r.hints.SetText("[::b]" + tag(colDim) + hints)
 }

@@ -23,12 +23,14 @@ import (
 )
 
 type ui struct {
-	app *tview.Application
-	db  *db.Database
+	app     *tview.Application
+	db      *db.Database
+	homeDir string
 
 	sessions  []*db.Session
 	allAgents []string // distinct agents across all sessions, for the filter
 	agentIdx  int      // 0 = all agents, otherwise allAgents[agentIdx-1]
+	syncing   bool     // a pull is running in the background
 
 	results   []*db.SearchResult
 	lastQuery string
@@ -46,9 +48,7 @@ type ui struct {
 	list    *tview.List
 	preview *tview.TextView
 	status  *tview.TextView
-	footer  *tview.Flex
-	hints   *tview.TextView
-	search  *tview.InputField
+	input   *tview.InputField // command box under the header: / commands or search
 
 	restore *db.Session // set when the user confirms a restore
 }
@@ -60,7 +60,7 @@ func Run(database *db.Database, homeDir string) (*db.Session, error) {
 	// Best-effort Codex sync, same as `handshake list`.
 	adapters.IngestCodexSessions(database, homeDir)
 
-	u, err := newUI(database)
+	u, err := newUI(database, homeDir)
 	if err != nil {
 		return nil, err
 	}
@@ -72,20 +72,39 @@ func Run(database *db.Database, homeDir string) (*db.Session, error) {
 
 // newUI constructs the fully wired application without running it, so tests
 // can drive it on a simulation screen.
-func newUI(database *db.Database) (*ui, error) {
+func newUI(database *db.Database, homeDir string) (*ui, error) {
 	applyTheme()
-	u := &ui{app: tview.NewApplication(), db: database}
+	u := &ui{app: tview.NewApplication(), db: database, homeDir: homeDir}
 	if err := u.loadSessions(); err != nil {
 		return nil, err
 	}
-	for _, s := range u.sessions {
+	u.refreshAgents()
+	u.build()
+	u.renderList()
+	return u, nil
+}
+
+// refreshAgents recomputes the distinct-agent list for the filter, keeping
+// the current filter selection when its agent still exists.
+func (u *ui) refreshAgents() {
+	current := u.agentFilter()
+	all, err := u.db.ListSessions("")
+	if err != nil {
+		return
+	}
+	u.allAgents = nil
+	for _, s := range all {
 		if !contains(u.allAgents, s.Agent) {
 			u.allAgents = append(u.allAgents, s.Agent)
 		}
 	}
-	u.build()
-	u.renderList()
-	return u, nil
+	u.agentIdx = 0
+	for i, a := range u.allAgents {
+		if a == current {
+			u.agentIdx = i + 1
+			break
+		}
+	}
 }
 
 func contains(xs []string, x string) bool {
@@ -143,35 +162,43 @@ func (u *ui) build() {
 		AddItem(title, 0, 1, false).
 		AddItem(u.status, 0, 1, false)
 
-	u.hints = tview.NewTextView()
-	u.hints.SetDynamicColors(true).SetText(hintBar())
-
-	u.search = tview.NewInputField()
-	u.search.SetLabel(" / ").
+	u.input = tview.NewInputField()
+	u.input.SetLabel("› ").
 		SetLabelColor(colAccent).
 		SetFieldBackgroundColor(tcell.ColorDefault).
 		SetFieldTextColor(colText).
-		SetPlaceholder("search every session…").
+		SetPlaceholder("type / for commands · anything else searches every session…").
 		SetPlaceholderTextColor(colFaint).
 		SetDoneFunc(func(key tcell.Key) {
 			switch key {
 			case tcell.KeyEnter:
-				u.runSearch(strings.TrimSpace(u.search.GetText()))
+				text := strings.TrimSpace(u.input.GetText())
+				switch {
+				case text == "":
+					u.closeInput()
+				case strings.HasPrefix(text, "/"):
+					u.runCommand(text)
+				default:
+					u.runSearch(text)
+				}
 			case tcell.KeyEscape:
-				u.closeSearch()
+				u.closeInput()
 			}
 		})
-
-	u.footer = tview.NewFlex()
-	u.footer.AddItem(u.hints, 0, 1, false)
+	u.input.SetAutocompleteFunc(u.completeCommand)
+	u.input.SetAutocompletedFunc(u.commandSelected)
+	u.input.SetBorder(true).
+		SetBorderPadding(0, 0, 1, 1).
+		SetBorderColor(colBorder)
+	focusColors(u.input.Box)
 
 	body := tview.NewFlex().
 		AddItem(u.list, 0, 2, true).
 		AddItem(u.preview, 0, 3, false)
 	root := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(header, 1, 0, false).
-		AddItem(body, 0, 1, true).
-		AddItem(u.footer, 1, 0, false)
+		AddItem(u.input, 3, 0, false).
+		AddItem(body, 0, 1, true)
 
 	u.viewReader = newReader()
 	u.subReader = newReader()
@@ -182,20 +209,7 @@ func (u *ui) build() {
 	u.updateStatus()
 }
 
-func hintBar() string {
-	key := func(k, label string) string {
-		return tag(colAccent) + k + tag(colFaint) + " " + label
-	}
-	return " " + tag(colFaint) +
-		key("enter", "open") + "   " +
-		key("r", "brief") + "   " +
-		key("t", "timeline") + "   " +
-		key("/", "search") + "   " +
-		key("a", "agent") + "   " +
-		key("q", "quit")
-}
-
-const viewHints = "esc back · ↑↓ scroll · d detail · r brief · t timeline · y restore"
+const viewHints = "esc back · ↑↓ scroll · d detail · r brief · t timeline · y restore · h help"
 
 func (u *ui) updateStatus() {
 	filter := "all agents"
@@ -213,7 +227,7 @@ func (u *ui) updateStatus() {
 // onKey routes keys by layer: sub above view above browser. Esc always backs
 // out one layer; q always quits (except while typing a search).
 func (u *ui) onKey(ev *tcell.EventKey) *tcell.EventKey {
-	if u.app.GetFocus() == u.search {
+	if u.app.GetFocus() == u.input {
 		return ev
 	}
 	if ev.Rune() == 'q' {
@@ -246,6 +260,8 @@ func (u *ui) onKey(ev *tcell.EventKey) *tcell.EventKey {
 			u.openView("timeline", u.viewSess)
 		case ev.Rune() == 'y':
 			u.openConfirm(u.viewSess)
+		case ev.Rune() == 'h', ev.Rune() == '?':
+			u.openHelp()
 		default:
 			return ev // arrows scroll the reader / move the tree
 		}
@@ -261,9 +277,13 @@ func (u *ui) onKey(ev *tcell.EventKey) *tcell.EventKey {
 			u.updatePreview(u.list.GetCurrentItem())
 		}
 	case ev.Rune() == '/':
-		u.openSearch()
+		u.openInput()
 	case ev.Rune() == 'a':
 		u.cycleAgent()
+	case ev.Rune() == 's':
+		u.startSync("")
+	case ev.Rune() == 'h', ev.Rune() == '?':
+		u.openHelp()
 	case ev.Rune() == 'r':
 		if s := u.currentSession(); s != nil {
 			u.openView("brief", s)
@@ -532,23 +552,106 @@ func restorePacket(s *db.Session) string {
 	return git.BuildRestorePacket(s.Title, s.Agent, s.UpdatedAt, s.WorkingDir, &checkpoint, s.Summary, s.Decisions)
 }
 
-// ── search ─────────────────────────────────────────────────────────────────
+// ── command box: / commands or full-text search ────────────────────────────
 
-func (u *ui) openSearch() {
-	u.search.SetText("")
-	u.footer.Clear()
-	u.footer.AddItem(u.search, 0, 1, true)
-	u.app.SetFocus(u.search)
+// slashCommand is one entry in the / dropdown. args is rendered in the
+// dropdown and, when non-empty, selecting the command waits for an argument
+// instead of running immediately.
+type slashCommand struct {
+	name string
+	args string
+	desc string
+	run  func(u *ui, arg string)
 }
 
-func (u *ui) closeSearch() {
-	u.footer.Clear()
-	u.footer.AddItem(u.hints, 0, 1, false)
+// Assigned in init: a package-level literal would form an initialization
+// cycle (slashCommands → openHelp → helpText → slashCommands).
+var slashCommands []slashCommand
+
+func init() {
+	slashCommands = []slashCommand{
+		{"/open", "", "open the selected session", func(u *ui, _ string) { u.openView("detail", u.currentSession()) }},
+		{"/brief", "", "handoff brief for the selected session", func(u *ui, _ string) { u.openView("brief", u.currentSession()) }},
+		{"/timeline", "", "timeline for the selected session", func(u *ui, _ string) { u.openView("timeline", u.currentSession()) }},
+		{"/search", "<query>", "search across all sessions", func(u *ui, arg string) { u.runSearch(arg) }},
+		{"/pull", "<agent>", "pull sessions from agent storage", func(u *ui, arg string) { u.startSync(arg) }},
+		{"/agent", "<name>", "filter by agent · no name cycles", func(u *ui, arg string) { u.setAgentFilter(arg) }},
+		{"/help", "", "all commands and keys", func(u *ui, _ string) { u.openHelp() }},
+		{"/quit", "", "leave the browser", func(u *ui, _ string) { u.app.Stop() }},
+	}
+}
+
+func findCommand(name string) *slashCommand {
+	for i := range slashCommands {
+		if slashCommands[i].name == name {
+			return &slashCommands[i]
+		}
+	}
+	return nil
+}
+
+func (u *ui) openInput() {
+	u.input.SetText("")
+	u.app.SetFocus(u.input)
+}
+
+func (u *ui) closeInput() {
+	u.input.SetText("")
 	u.app.SetFocus(u.list)
 }
 
+// completeCommand feeds the dropdown while the box holds a bare "/…" word.
+func (u *ui) completeCommand(current string) []string {
+	if !strings.HasPrefix(current, "/") || strings.Contains(current, " ") {
+		return nil
+	}
+	var entries []string
+	for _, c := range slashCommands {
+		if strings.HasPrefix(c.name, strings.ToLower(current)) {
+			label := c.name
+			if c.args != "" {
+				label += " " + c.args
+			}
+			entries = append(entries, fmt.Sprintf("%-17s %s", label, c.desc))
+		}
+	}
+	return entries
+}
+
+// commandSelected fires when the user picks a dropdown entry. Commands
+// without an argument run immediately; the rest wait in the box for one.
+func (u *ui) commandSelected(text string, index, source int) bool {
+	if source == tview.AutocompletedNavigate {
+		return false
+	}
+	name := strings.Fields(text)[0]
+	if cmd := findCommand(name); cmd != nil && cmd.args == "" &&
+		(source == tview.AutocompletedEnter || source == tview.AutocompletedClick) {
+		u.runCommand(name)
+		return true
+	}
+	u.input.SetText(name + " ")
+	return true
+}
+
+func (u *ui) runCommand(text string) {
+	fields := strings.SplitN(strings.TrimSpace(text), " ", 2)
+	name := strings.ToLower(fields[0])
+	arg := ""
+	if len(fields) > 1 {
+		arg = strings.TrimSpace(fields[1])
+	}
+	cmd := findCommand(name)
+	u.closeInput()
+	if cmd == nil {
+		u.status.SetText(tag(colRed) + "unknown command " + tview.Escape(name) + " — type / to list commands ")
+		return
+	}
+	cmd.run(u, arg)
+}
+
 func (u *ui) runSearch(query string) {
-	u.closeSearch()
+	u.closeInput()
 	if query == "" {
 		return
 	}
@@ -571,6 +674,37 @@ func (u *ui) cycleAgent() {
 		return
 	}
 	u.agentIdx = (u.agentIdx + 1) % (len(u.allAgents) + 1)
+	u.reloadList()
+}
+
+// setAgentFilter filters by agent name ("all" or empty cycles instead).
+func (u *ui) setAgentFilter(name string) {
+	switch name {
+	case "":
+		u.cycleAgent()
+		return
+	case "all":
+		u.agentIdx = 0
+	default:
+		idx := -1
+		for i, a := range u.allAgents {
+			if a == name {
+				idx = i + 1
+				break
+			}
+		}
+		if idx < 0 {
+			u.status.SetText(tag(colRed) + "no sessions from " + tview.Escape(name) + " ")
+			return
+		}
+		u.agentIdx = idx
+	}
+	u.reloadList()
+}
+
+// reloadList re-queries sessions for the current filter and redraws the
+// browser back in session mode.
+func (u *ui) reloadList() {
 	if err := u.loadSessions(); err != nil {
 		u.preview.SetText(fmt.Sprintf("\n%sFailed to load sessions:[-] %s", tag(colRed), tview.Escape(err.Error())))
 		return
@@ -579,4 +713,132 @@ func (u *ui) cycleAgent() {
 	u.updateStatus()
 	u.renderList()
 	u.updatePreview(u.list.GetCurrentItem())
+}
+
+// ── pull ───────────────────────────────────────────────────────────────────
+
+// startSync pulls sessions from agents' native storage in the background,
+// then reloads the list and reports the outcome in the status bar. An empty
+// agent pulls everything.
+func (u *ui) startSync(agent string) {
+	if u.syncing {
+		return
+	}
+	if agent != "" && !contains(adapters.PullableAgents, agent) {
+		u.status.SetText(tag(colRed) + "unknown agent " + tview.Escape(agent) +
+			" — " + strings.Join(adapters.PullableAgents, ", ") + " ")
+		return
+	}
+	u.syncing = true
+	u.status.SetText(tag(colYellow) + "pulling sessions… ")
+
+	go func() {
+		var results []adapters.SyncResult
+		if agent != "" {
+			results = []adapters.SyncResult{adapters.SyncAgent(u.db, u.homeDir, agent)}
+		} else {
+			results = adapters.SyncAll(u.db, u.homeDir)
+		}
+		u.app.QueueUpdateDraw(func() {
+			u.syncing = false
+			u.refreshAgents()
+			if err := u.loadSessions(); err != nil {
+				u.status.SetText(tag(colRed) + "pull failed: " + tview.Escape(err.Error()) + " ")
+				return
+			}
+			u.inResults = false
+			u.renderList()
+			u.updatePreview(u.list.GetCurrentItem())
+			u.status.SetText(syncSummary(results))
+		})
+	}()
+}
+
+// syncSummary condenses per-agent pull results into one status-bar line.
+func syncSummary(results []adapters.SyncResult) string {
+	imported, updated, failed := 0, 0, 0
+	for _, r := range results {
+		imported += r.Imported
+		updated += r.Updated
+		failed += r.Failed
+		if r.Err != nil {
+			failed++
+		}
+	}
+	var parts []string
+	if imported > 0 {
+		parts = append(parts, fmt.Sprintf("%d new", imported))
+	}
+	if updated > 0 {
+		parts = append(parts, fmt.Sprintf("%d updated", updated))
+	}
+	if failed > 0 {
+		parts = append(parts, fmt.Sprintf("%d failed", failed))
+	}
+	if len(parts) == 0 {
+		return tag(colFaint) + "pull: nothing new "
+	}
+	col := colGreen
+	if imported+updated == 0 {
+		col = colYellow
+	}
+	return tag(col) + "pull: " + strings.Join(parts, " · ") + " "
+}
+
+// ── help ───────────────────────────────────────────────────────────────────
+
+// openHelp shows every keybinding on the sub layer, so it works from the
+// browser and from any full-screen view.
+func (u *ui) openHelp() {
+	u.openSub("help", "help", helpText(), "esc close · ↑↓ scroll")
+}
+
+func helpText() string {
+	var b strings.Builder
+	section := func(name string) {
+		fmt.Fprintf(&b, "\n%s── %s ──[-]\n\n", tag(colFaint), name)
+	}
+	key := func(k, desc string) {
+		fmt.Fprintf(&b, "  %s%-9s[-] %s%s[-]\n", tag(colAccent), k, tag(colText), desc)
+	}
+
+	section("browser")
+	key("enter", "open the selected session")
+	key("r", "handoff brief")
+	key("t", "session timeline")
+	key("/", "focus the command box")
+	key("a", "cycle the agent filter")
+	key("s", "pull sessions from agent storage ("+strings.Join(adapters.PullableAgents, ", ")+")")
+	key("h  ?", "this help")
+	key("esc", "leave search results")
+	key("q", "quit")
+
+	section("command box")
+	fmt.Fprintf(&b, "  %stype / for the command list · anything else searches every session[-]\n\n", tag(colDim))
+	for _, c := range slashCommands {
+		label := c.name
+		if c.args != "" {
+			label += " " + c.args
+		}
+		fmt.Fprintf(&b, "  %s%-17s[-] %s%s[-]\n", tag(colAccent2), label, tag(colText), c.desc)
+	}
+
+	section("full-screen view")
+	key("↑ ↓", "scroll")
+	key("d", "session detail")
+	key("r", "handoff brief")
+	key("t", "session timeline")
+	key("y", "restore this session (asks to confirm)")
+	key("esc", "back one layer")
+
+	section("restore confirm")
+	key("y  enter", "restore & print the handoff brief")
+	key("n  esc", "cancel")
+
+	section("command line")
+	fmt.Fprintf(&b, "  %s%s[-]%s   import sessions without opening the TUI\n",
+		tag(colAccent2), tview.Escape("handshake pull [agent]"), tag(colText))
+	fmt.Fprintf(&b, "  %shandshake restore <title>[-]%s print a session's handoff brief\n",
+		tag(colAccent2), tag(colText))
+	return b.String()
 }
