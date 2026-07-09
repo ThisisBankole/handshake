@@ -239,8 +239,13 @@ func TestFullScreenDetailAndBrief(t *testing.T) {
 		"feat: public API docs at /docs",
 		"- Markdown-driven docs",
 		"── timeline ──", "you  fix the stale registrations",
-		"── summary ──", "auto-detect busy port",
+		"── decisions ──", "auto-detect busy port",
 		"▶ view brief", "y restore")
+
+	// The summary is not on the detail — it lives behind the brief button.
+	if strings.Contains(h.screenText(), "── summary ──") {
+		t.Error("detail still renders a summary section")
+	}
 
 	// End lands on the brief button; Enter presses it.
 	h.key(tcell.KeyEnd, 0)

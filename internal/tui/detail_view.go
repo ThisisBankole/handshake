@@ -45,29 +45,22 @@ func (u *ui) detailTree(s *db.Session) tview.Primitive {
 		add(tag(colFaint) + "remote[-]   " + tag(colDim) + tview.Escape(st.Remote) + "[-]")
 	}
 
-	// ── session commits ──
-	if hasGit {
-		if len(st.Commits) > 0 {
-			section("session commits")
-			for _, l := range commitRailLines(&st) {
-				add(l)
-			}
-		} else {
-			section("git")
-			short := st.Commit
-			if len(short) > 8 {
-				short = short[:8]
-			}
-			add(fmt.Sprintf("%s%s[-] @ %s%s[-]  %s",
-				tag(colAccent2), tview.Escape(st.Branch), tag(colDim), short,
-				tview.Escape(oneLine(st.Message, 48))))
-			if strings.TrimSpace(st.Status) == "" {
-				add(tag(colGreen) + "✓ clean[-]")
-			} else {
-				n := len(strings.Split(strings.TrimSpace(st.Status), "\n"))
-				add(fmt.Sprintf("%s● %d uncommitted change(s)[-]", tag(colYellow), n))
-			}
+	// ── session commits ── every session gets this section so the layout is
+	// stable across agents. Stored commits win; sessions imported by pull
+	// have no stored git state, so reconstruct the window from the repo when
+	// it still exists.
+	if !hasGit || len(st.Commits) == 0 {
+		if s.WorkingDir != "" && s.CreatedAt > 0 {
+			st.Commits = git.CommitsBetween(s.WorkingDir, s.CreatedAt-300, s.UpdatedAt+300)
 		}
+	}
+	section("session commits")
+	if hasGit || len(st.Commits) > 0 {
+		for _, l := range commitRailLines(&st) {
+			add(l)
+		}
+	} else {
+		add(tag(colFaint) + "no git activity recorded for this session[-]")
 	}
 
 	// ── timeline ── chapters fold on enter, events open in the sub reader.
@@ -88,15 +81,7 @@ func (u *ui) detailTree(s *db.Session) tview.Primitive {
 		}
 	}
 
-	// ── summary / decisions ──
-	section("summary")
-	if strings.TrimSpace(s.Summary) != "" {
-		for _, l := range wrapText(s.Summary, 84) {
-			add(tag(colText) + tview.Escape(l) + "[-]")
-		}
-	} else {
-		add(tag(colFaint) + "no summary recorded[-]")
-	}
+	// ── decisions ── (the summary lives in the brief, behind the button)
 	if strings.TrimSpace(s.Decisions) != "" {
 		section("decisions")
 		for _, line := range strings.Split(strings.TrimSpace(s.Decisions), "\n") {

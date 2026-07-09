@@ -649,24 +649,30 @@ func commitRailLines(st *git.State) []string {
 	dot := tag(colGreen) + "●[-] "
 	pipe := tag(colBorder) + "│[-]  "
 
-	short := st.Commit
-	if len(short) > 8 {
-		short = short[:8]
-	}
-	push("%s%s%s[-] @ %s%s[-]  %s",
-		dot, tag(colAccent2), tview.Escape(st.Branch), tag(colDim), short,
-		tview.Escape(oneLine(st.Message, 44)))
-	if strings.TrimSpace(st.Status) == "" {
-		push("%s%s✓ clean[-]", pipe, tag(colGreen))
-	} else {
-		n := len(strings.Split(strings.TrimSpace(st.Status), "\n"))
-		push("%s%s● %d uncommitted change(s)[-]", pipe, tag(colYellow), n)
+	// The branch-head node only makes sense when state was captured at
+	// checkpoint time; live-reconstructed rails render commits alone.
+	if st.Commit != "" {
+		short := st.Commit
+		if len(short) > 8 {
+			short = short[:8]
+		}
+		push("%s%s%s[-] @ %s%s[-]  %s",
+			dot, tag(colAccent2), tview.Escape(st.Branch), tag(colDim), short,
+			tview.Escape(oneLine(st.Message, 44)))
+		if strings.TrimSpace(st.Status) == "" {
+			push("%s%s✓ clean[-]", pipe, tag(colGreen))
+		} else {
+			n := len(strings.Split(strings.TrimSpace(st.Status), "\n"))
+			push("%s%s● %d uncommitted change(s)[-]", pipe, tag(colYellow), n)
+		}
 	}
 
 	// Stored oldest-first; show newest-first under the branch head.
 	for i := len(st.Commits) - 1; i >= 0; i-- {
 		c := st.Commits[i]
-		push("%s", pipe)
+		if st.Commit != "" || i < len(st.Commits)-1 {
+			push("%s", pipe)
+		}
 		push("%s%scommit %s[-]", dot, tag(colAccent), tview.Escape(c.Hash))
 		if c.Author != "" {
 			push("%s%sAuthor: %s[-]", pipe, tag(colDim), tview.Escape(c.Author))
