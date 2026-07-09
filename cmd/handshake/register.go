@@ -175,16 +175,21 @@ func registerClaudeCodeHooks(homeDir string) {
 		return
 	}
 
-	hooksConfigPath := filepath.Join(homeDir, ".claude", "hooks.json")
-	registerClaudeCodeHooksConfig(hooksConfigPath, python, preCompactPath, postCompactPath, stopPath)
+	// Hooks must live in settings.json — Claude Code does not read ~/.claude/hooks.json.
+	settingsPath := filepath.Join(homeDir, ".claude", "settings.json")
+	registerClaudeCodeHooksConfig(settingsPath, python, preCompactPath, postCompactPath, stopPath)
+
+	// Earlier versions wrote hook config to ~/.claude/hooks.json, which Claude
+	// Code never reads. Strip our stale entries so they don't confuse anyone.
+	removeHandshakeHooksFromConfig(filepath.Join(homeDir, ".claude", "hooks.json"))
 }
 
-func registerClaudeCodeHooksConfig(hooksConfigPath, python, preCompactPath, postCompactPath, stopPath string) {
+func registerClaudeCodeHooksConfig(settingsPath, python, preCompactPath, postCompactPath, stopPath string) {
 	var config map[string]any
-	data, err := os.ReadFile(hooksConfigPath)
+	data, err := os.ReadFile(settingsPath)
 	if err == nil {
 		if err := json.Unmarshal(data, &config); err != nil {
-			fmt.Println("- Claude Code hooks: hooks.json is not valid JSON; add manually:")
+			fmt.Println("- Claude Code hooks: settings.json is not valid JSON; add manually:")
 			printClaudeCodeHooksSnippet(python, preCompactPath, postCompactPath, stopPath)
 			return
 		}
@@ -254,12 +259,12 @@ func registerClaudeCodeHooksConfig(hooksConfigPath, python, preCompactPath, post
 
 	config["hooks"] = hooks
 
-	if _, err := os.Stat(hooksConfigPath); err == nil {
-		backup(hooksConfigPath)
+	if _, err := os.Stat(settingsPath); err == nil {
+		backup(settingsPath)
 	}
 
-	if err := writeJSON(hooksConfigPath, config); err != nil {
-		fmt.Printf("✗ Claude Code hooks: could not write hooks.json: %v\n", err)
+	if err := writeJSON(settingsPath, config); err != nil {
+		fmt.Printf("✗ Claude Code hooks: could not write settings.json: %v\n", err)
 		return
 	}
 
@@ -267,7 +272,7 @@ func registerClaudeCodeHooksConfig(hooksConfigPath, python, preCompactPath, post
 }
 
 func printClaudeCodeHooksSnippet(python, preCompactPath, postCompactPath, stopPath string) {
-	fmt.Printf(`  Add to ~/.claude/hooks.json:
+	fmt.Printf(`  Add to ~/.claude/settings.json:
   {
     "hooks": {
       "PreCompact": [{"matcher":"auto|manual","hooks":[{"type":"command","command":"%s %s"}]}],
@@ -279,28 +284,41 @@ func printClaudeCodeHooksSnippet(python, preCompactPath, postCompactPath, stopPa
 }
 
 func deregisterClaudeCodeHooks(homeDir string) {
-	// fmt.Println("DEBUG: running deregisterClaudeCodeHooks")
 	hooksDir := filepath.Join(homeDir, ".claude", "hooks")
 	os.Remove(filepath.Join(hooksDir, "handshake_pre_compact.py"))
 	os.Remove(filepath.Join(hooksDir, "handshake_post_compact.py"))
 	os.Remove(filepath.Join(hooksDir, "handshake_stop.py"))
 
-	hooksConfigPath := filepath.Join(homeDir, ".claude", "hooks.json")
-	data, err := os.ReadFile(hooksConfigPath)
-	if err != nil {
+	removed := removeHandshakeHooksFromConfig(filepath.Join(homeDir, ".claude", "settings.json"))
+	// Legacy location from versions that wrote hooks.json (never read by Claude Code).
+	removed = removeHandshakeHooksFromConfig(filepath.Join(homeDir, ".claude", "hooks.json")) || removed
+
+	if removed {
+		fmt.Println("✓ Claude Code hooks: removed")
+	} else {
 		fmt.Println("✓ Claude Code hooks: nothing to remove")
-		return
+	}
+}
+
+// removeHandshakeHooksFromConfig strips handshake hook entries from the given
+// hooks config file. Returns true if anything was removed.
+func removeHandshakeHooksFromConfig(configPath string) bool {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return false
 	}
 
 	var config map[string]any
 	if err := json.Unmarshal(data, &config); err != nil {
-		return
+		return false
 	}
 
 	hooks, _ := config["hooks"].(map[string]any)
 	if hooks == nil {
-		return
+		return false
 	}
+
+	removed := false
 
 	for _, key := range []string{"PreCompact", "PostCompact", "Stop"} {
 		entries, _ := hooks[key].([]any)
@@ -325,6 +343,8 @@ func deregisterClaudeCodeHooks(homeDir string) {
 			}
 			if !isHandshake {
 				filtered = append(filtered, entry)
+			} else {
+				removed = true
 			}
 		}
 		if len(filtered) == 0 {
@@ -334,10 +354,14 @@ func deregisterClaudeCodeHooks(homeDir string) {
 		}
 	}
 
+	if !removed {
+		return false
+	}
+
 	config["hooks"] = hooks
-	backup(hooksConfigPath)
-	writeJSON(hooksConfigPath, config)
-	fmt.Println("✓ Claude Code hooks: removed")
+	backup(configPath)
+	writeJSON(configPath, config)
+	return true
 }
 
 // --- OpenCode MCP registration ---
