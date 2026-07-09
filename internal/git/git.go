@@ -237,6 +237,52 @@ func parseStatusLines(status string) map[string]string {
 	return result
 }
 
+// Commit is a single commit that landed during a session's time window.
+type Commit struct {
+	Hash    string // abbreviated hash
+	Subject string
+	When    int64 // author time, unix
+}
+
+// CommitsBetween returns commits reachable from HEAD whose author time falls
+// within [from, to]. Returns nil if workingDir is missing or not a git repo —
+// like CaptureState, absence of history is not an error. Results are oldest
+// first so they interleave naturally with a chronological timeline.
+func CommitsBetween(workingDir string, from, to int64) []Commit {
+	if workingDir == "" {
+		return nil
+	}
+	if err := run(workingDir, "rev-parse", "--git-dir"); err != nil {
+		return nil
+	}
+
+	// --since/--until filter server-side; timestamps are still checked in Go
+	// because git's date parsing is fuzzy at the boundaries.
+	out, err := rawOutput(workingDir, "log",
+		"--since="+time.Unix(from, 0).Format(time.RFC3339),
+		"--until="+time.Unix(to, 0).Format(time.RFC3339),
+		"--format=%h%x09%at%x09%s")
+	if err != nil || out == "" {
+		return nil
+	}
+
+	var commits []Commit
+	for _, line := range strings.Split(out, "\n") {
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		var at int64
+		fmt.Sscanf(parts[1], "%d", &at)
+		if at < from || at > to {
+			continue
+		}
+		// git log is newest first; prepend to end up oldest first.
+		commits = append([]Commit{{Hash: parts[0], Subject: parts[2], When: at}}, commits...)
+	}
+	return commits
+}
+
 // run executes a git command in workingDir and returns only the error.
 func run(workingDir string, args ...string) error {
 	cmd := exec.Command("git", append([]string{"-C", workingDir}, args...)...)

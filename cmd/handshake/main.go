@@ -10,11 +10,15 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/mattn/go-isatty"
+
 	"handshake/internal/adapters"
 	"handshake/internal/db"
 	"handshake/internal/engine"
 	"handshake/internal/git"
 	"handshake/internal/server"
+	"handshake/internal/timeline"
+	"handshake/internal/tui"
 	"handshake/plugins/opencode"
 )
 
@@ -46,13 +50,21 @@ func main() {
 	case "serve":
 		serveCmd(homeDir, dbPath)
 	case "list":
-		listCmd(dbPath)
+		listCmd(homeDir, dbPath)
+	case "browse", "ui":
+		browseCmd(homeDir, dbPath)
 	case "restore":
 		if len(os.Args) < 3 {
 			fmt.Println("Usage: handshake restore <title>")
 			os.Exit(1)
 		}
 		restoreCmd(dbPath, os.Args[2])
+	case "timeline":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: handshake timeline <title>")
+			os.Exit(1)
+		}
+		timelineCmd(dbPath, os.Args[2])
 	case "install-service":
 		installServiceCmd(homeDir)
 	case "uninstall-service":
@@ -77,8 +89,10 @@ func usage() {
 	fmt.Println("  setup              Guided setup — registers with agents, installs service (default)")
 	fmt.Println("  init               Non-interactive setup — create database and register with agents")
 	fmt.Println("  serve              Start the MCP + ingest server (default: " + listenAddr + ")")
-	fmt.Println("  list               List checkpointed sessions")
+	fmt.Println("  browse             Interactive session browser (TUI)")
+	fmt.Println("  list               List checkpointed sessions (opens browser on a terminal)")
 	fmt.Println("  restore <title>    Print the handoff brief for a session")
+	fmt.Println("  timeline <title>   Print a session's activity timeline (prompts, tools, commits)")
 	fmt.Println("  install-service    Start the daemon on login (launchd/systemd)")
 	fmt.Println("  uninstall-service  Remove the login service")
 	fmt.Println("  uninstall          Remove Handshake from all agents and clean up")
@@ -175,11 +189,17 @@ func serveCmd(homeDir, dbPath string) {
 	}
 }
 
-func listCmd(dbPath string) {
+func listCmd(homeDir, dbPath string) {
+	// On a terminal, open the interactive browser; keep plain text output
+	// when piped so scripts and agents can still parse it.
+	if isatty.IsTerminal(os.Stdout.Fd()) {
+		browseCmd(homeDir, dbPath)
+		return
+	}
+
 	database := openDB(dbPath)
 	defer database.Close()
 	// Auto-sync Codex sessions before listing
-	homeDir, _ := os.UserHomeDir()
 	adapters.IngestCodexSessions(database, homeDir)
 
 	sessions, err := database.ListSessions("")
@@ -196,6 +216,57 @@ func listCmd(dbPath string) {
 	for _, session := range sessions {
 		fmt.Printf("- %s (%s)\n", session.Title, session.Agent)
 	}
+}
+
+// browseCmd runs the interactive session browser. If the user confirms a
+// restore inside the TUI, the packet and brief are printed after the
+// terminal is restored — same output shape as `handshake restore`.
+func browseCmd(homeDir, dbPath string) {
+	database := openDB(dbPath)
+	defer database.Close()
+
+	session, err := tui.Run(database, homeDir)
+	if err != nil {
+		fmt.Printf("Browser error: %v\n", err)
+		os.Exit(1)
+	}
+	if session == nil {
+		return
+	}
+
+	if session.GitState != "" {
+		var checkpoint git.State
+		if err := json.Unmarshal([]byte(session.GitState), &checkpoint); err == nil {
+			workingDir := session.WorkingDir
+			if workingDir == "" {
+				workingDir = homeDir
+			}
+			if packet := git.BuildRestorePacket(session.Title, session.Agent, session.UpdatedAt, workingDir, &checkpoint, session.Summary, session.Decisions); packet != "" {
+				fmt.Println(packet)
+				fmt.Println()
+			}
+		}
+	}
+
+	brief, err := engine.NewBriefGenerator(database).GenerateBrief(session.ID)
+	if err != nil {
+		fmt.Printf("Failed to generate brief: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(brief.Brief)
+}
+
+func timelineCmd(dbPath, title string) {
+	database := openDB(dbPath)
+	defer database.Close()
+
+	session := findSessionCLI(database, title)
+	chapters, err := timeline.Build(database, session)
+	if err != nil {
+		fmt.Printf("Failed to build timeline: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(timeline.Render(session, chapters))
 }
 
 func restoreCmd(dbPath, title string) {
