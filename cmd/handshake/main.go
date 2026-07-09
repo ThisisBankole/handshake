@@ -51,6 +51,12 @@ func main() {
 		serveCmd(homeDir, dbPath)
 	case "list":
 		listCmd(homeDir, dbPath)
+	case "pull":
+		agent := ""
+		if len(os.Args) > 2 {
+			agent = os.Args[2]
+		}
+		pullCmd(homeDir, dbPath, agent)
 	case "browse", "ui":
 		browseCmd(homeDir, dbPath)
 	case "restore":
@@ -91,6 +97,8 @@ func usage() {
 	fmt.Println("  serve              Start the MCP + ingest server (default: " + listenAddr + ")")
 	fmt.Println("  browse             Interactive session browser (TUI)")
 	fmt.Println("  list               List checkpointed sessions (opens browser on a terminal)")
+	fmt.Println("  pull [agent]       Import sessions from agents' native storage")
+	fmt.Println("                     (agents: " + strings.Join(adapters.PullableAgents, ", ") + "; default all)")
 	fmt.Println("  restore <title>    Print the handoff brief for a session")
 	fmt.Println("  timeline <title>   Print a session's activity timeline (prompts, tools, commits)")
 	fmt.Println("  install-service    Start the daemon on login (launchd/systemd)")
@@ -173,6 +181,20 @@ func serveCmd(homeDir, dbPath string) {
 	fmt.Printf("Handshake %s listening on http://%s\n", version, addr)
 	fmt.Printf("  MCP endpoint:    http://%s/mcp\n", addr)
 	fmt.Printf("  Ingest endpoint: http://%s/ingest\n", addr)
+
+	// Catch-up sync: sweep in sessions that ended while the daemon was down
+	// or whose agent hooks never fired. Runs in the background so the port
+	// binds immediately.
+	go func() {
+		imported, updated := 0, 0
+		for _, res := range adapters.SyncAll(database, homeDir) {
+			imported += res.Imported
+			updated += res.Updated
+		}
+		if imported+updated > 0 {
+			fmt.Printf("  Catch-up sync:   %d session(s) imported, %d updated\n", imported, updated)
+		}
+	}()
 	if err := srv.Serve(addr); err != nil {
 		if strings.Contains(err.Error(), "address already in use") {
 			fmt.Printf("Port conflict: %s is already in use.\n", addr)
@@ -187,6 +209,67 @@ func serveCmd(homeDir, dbPath string) {
 		}
 		os.Exit(1)
 	}
+}
+
+// pullCmd imports sessions from agents' native local storage. agent narrows
+// the pull to one agent; empty pulls all of them.
+func pullCmd(homeDir, dbPath, agent string) {
+	if agent != "" && !contains(adapters.PullableAgents, agent) {
+		fmt.Printf("Unknown agent %q — pullable agents: %s\n", agent, strings.Join(adapters.PullableAgents, ", "))
+		os.Exit(1)
+	}
+
+	database := openDB(dbPath)
+	defer database.Close()
+
+	var results []adapters.SyncResult
+	if agent != "" {
+		results = []adapters.SyncResult{adapters.SyncAgent(database, homeDir, agent)}
+	} else {
+		results = adapters.SyncAll(database, homeDir)
+	}
+
+	imported, updated := 0, 0
+	for _, res := range results {
+		switch {
+		case res.Err != nil:
+			fmt.Printf("✗ %-12s %v\n", res.Agent, res.Err)
+		case res.Scanned == 0:
+			fmt.Printf("- %-12s no local sessions found\n", res.Agent)
+		default:
+			line := fmt.Sprintf("✓ %-12s %d scanned", res.Agent, res.Scanned)
+			if res.Imported > 0 {
+				line += fmt.Sprintf(" · %d new", res.Imported)
+			}
+			if res.Updated > 0 {
+				line += fmt.Sprintf(" · %d updated", res.Updated)
+			}
+			if res.Unchanged > 0 {
+				line += fmt.Sprintf(" · %d unchanged", res.Unchanged)
+			}
+			if res.Failed > 0 {
+				line += fmt.Sprintf(" · %d failed", res.Failed)
+			}
+			fmt.Println(line)
+			imported += res.Imported
+			updated += res.Updated
+		}
+	}
+
+	if imported+updated == 0 {
+		fmt.Println("\nEverything already up to date.")
+	} else {
+		fmt.Printf("\n%d session(s) imported, %d updated. Browse them with: handshake browse\n", imported, updated)
+	}
+}
+
+func contains(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
 }
 
 func listCmd(homeDir, dbPath string) {

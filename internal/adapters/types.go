@@ -75,48 +75,10 @@ func Ingest(database *db.Database, session *SessionData) error {
 // an explicit checkpoint first — same behaviour as OpenCode's plugin
 // auto-sync and Claude Code's JSONL watcher.
 func IngestCodexSessions(database *db.Database, homeDir string) error {
-	adapter := NewCodexAdapter(homeDir)
-
-	// List all sessions from the index
-	stubs, err := adapter.ListSessions()
-	if err != nil {
-		return fmt.Errorf("failed to list Codex sessions: %w", err)
+	res := SyncAgent(database, homeDir, "codex")
+	if res.Err != nil {
+		return fmt.Errorf("failed to list Codex sessions: %w", res.Err)
 	}
-
-	// Build the transcript path index once so each ReadSession below is an
-	// O(1) lookup instead of its own directory walk.
-	adapter.buildPathIndex()
-
-	for _, stub := range stubs {
-		// Check if already in canonical DB and up to date
-		existing, err := database.GetSession(stub.ID)
-		if err == nil && existing.UpdatedAt >= stub.UpdatedAt {
-			// Already synced and current — skip
-			continue
-		}
-
-		// Read full session from disk
-		session, err := adapter.ReadSession(stub.ID)
-		if err != nil {
-			// Session file missing or unreadable — store stub only
-			if storeErr := database.StoreSession(&db.Session{
-				ID:        stub.ID,
-				Title:     stub.Title,
-				Agent:     "codex",
-				UpdatedAt: stub.UpdatedAt,
-				CreatedAt: stub.CreatedAt,
-			}); storeErr != nil {
-				continue
-			}
-			continue
-		}
-
-		// Ingest full session into canonical DB
-		if err := Ingest(database, session); err != nil {
-			continue
-		}
-	}
-
 	return nil
 }
 

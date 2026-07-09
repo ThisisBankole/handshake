@@ -44,6 +44,7 @@ func (s *Server) Serve(addr string) error {
 	mux.Handle("/mcp", mcpserver.NewStreamableHTTPServer(s.mcp))
 	mux.HandleFunc("/ingest", s.handleIngest)
 	mux.HandleFunc("/generate-brief", s.handleGenerateBrief)
+	mux.HandleFunc("/sync", s.handleSync)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "ok")
