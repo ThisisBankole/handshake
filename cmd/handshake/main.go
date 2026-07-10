@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -17,6 +16,7 @@ import (
 	"handshake/internal/engine"
 	"handshake/internal/git"
 	"handshake/internal/server"
+	"handshake/internal/sessionmatch"
 	"handshake/internal/timeline"
 	"handshake/internal/tui"
 	"handshake/plugins/opencode"
@@ -59,12 +59,12 @@ func main() {
 		pullCmd(homeDir, dbPath, agent)
 	case "browse", "ui", "b", "-b", "--b":
 		browseCmd(homeDir, dbPath)
-	case "restore":
+	case "handoff":
 		if len(os.Args) < 3 {
-			fmt.Println("Usage: handshake restore <title>")
+			fmt.Println("Usage: handshake handoff <session-id-or-title>")
 			os.Exit(1)
 		}
-		restoreCmd(dbPath, os.Args[2])
+		handoffCmd(dbPath, os.Args[2])
 	case "timeline":
 		if len(os.Args) < 3 {
 			fmt.Println("Usage: handshake timeline <title>")
@@ -99,7 +99,7 @@ func usage() {
 	fmt.Println("  list               List checkpointed sessions (opens browser on a terminal)")
 	fmt.Println("  pull [agent]       Import sessions from agents' native storage")
 	fmt.Println("                     (agents: " + strings.Join(adapters.PullableAgents, ", ") + "; default all)")
-	fmt.Println("  restore <title>    Print the handoff brief for a session")
+	fmt.Println("  handoff <id|title> Print a session's handoff packet and brief")
 	fmt.Println("  timeline <title>   Print a session's activity timeline (prompts, tools, commits)")
 	fmt.Println("  install-service    Start the daemon on login (launchd/systemd)")
 	fmt.Println("  uninstall-service  Remove the login service")
@@ -187,12 +187,16 @@ func serveCmd(homeDir, dbPath string) {
 	// binds immediately.
 	go func() {
 		imported, updated := 0, 0
-		for _, res := range adapters.SyncAll(database, homeDir) {
+		results := adapters.SyncAll(database, homeDir)
+		for _, res := range results {
 			imported += res.Imported
 			updated += res.Updated
 		}
 		if imported+updated > 0 {
 			fmt.Printf("  Catch-up sync:   %d session(s) imported, %d updated\n", imported, updated)
+		}
+		for _, warning := range adapters.SyncWarnings(results) {
+			fmt.Printf("  Catch-up warning: %s\n", warning)
 		}
 	}()
 	if err := srv.Serve(addr); err != nil {
@@ -283,7 +287,10 @@ func listCmd(homeDir, dbPath string) {
 	database := openDB(dbPath)
 	defer database.Close()
 	// Auto-sync Codex sessions before listing
-	adapters.IngestCodexSessions(database, homeDir)
+	codexSync := adapters.IngestCodexSessions(database, homeDir)
+	for _, warning := range adapters.SyncWarnings([]adapters.SyncResult{codexSync}) {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
+	}
 
 	sessions, err := database.ListSessions("")
 	if err != nil {
@@ -297,13 +304,13 @@ func listCmd(homeDir, dbPath string) {
 
 	fmt.Println("Recent sessions:")
 	for _, session := range sessions {
-		fmt.Printf("- %s (%s)\n", session.Title, session.Agent)
+		fmt.Printf("- %s | %s (%s)\n", session.ID, session.Title, session.Agent)
 	}
 }
 
 // browseCmd runs the interactive session browser. If the user confirms a
-// restore inside the TUI, the packet and brief are printed after the
-// terminal is restored — same output shape as `handshake restore`.
+// handoff inside the TUI, the packet and brief are printed after the
+// terminal is restored — same output shape as `handshake handoff`.
 func browseCmd(homeDir, dbPath string) {
 	database := openDB(dbPath)
 	defer database.Close()
@@ -343,7 +350,11 @@ func timelineCmd(dbPath, title string) {
 	database := openDB(dbPath)
 	defer database.Close()
 
-	session := findSessionCLI(database, title)
+	session, err := findSessionCLI(database, title)
+	if err != nil {
+		fmt.Printf("Failed to select session: %v\n", err)
+		os.Exit(1)
+	}
 	chapters, err := timeline.Build(database, session)
 	if err != nil {
 		fmt.Printf("Failed to build timeline: %v\n", err)
@@ -352,13 +363,17 @@ func timelineCmd(dbPath, title string) {
 	fmt.Println(timeline.Render(session, chapters))
 }
 
-func restoreCmd(dbPath, title string) {
+func handoffCmd(dbPath, title string) {
 	database := openDB(dbPath)
 	defer database.Close()
 
-	session := findSessionCLI(database, title)
+	session, err := findSessionCLI(database, title)
+	if err != nil {
+		fmt.Printf("Failed to select session: %v\n", err)
+		os.Exit(1)
+	}
 
-	// If the session has stored git state, show the restore packet and prompt.
+	// Show any git drift before the handoff brief so a human can assess it.
 	if session.GitState != "" {
 		var checkpoint git.State
 		if err := json.Unmarshal([]byte(session.GitState), &checkpoint); err == nil {
@@ -369,14 +384,6 @@ func restoreCmd(dbPath, title string) {
 			packet := git.BuildRestorePacket(session.Title, session.Agent, session.UpdatedAt, workingDir, &checkpoint, session.Summary, session.Decisions)
 			if packet != "" {
 				fmt.Println(packet)
-				fmt.Print("\nInject this context? [Y/n] ")
-				scanner := bufio.NewScanner(os.Stdin)
-				scanner.Scan()
-				answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
-				if answer == "n" || answer == "no" {
-					fmt.Println("Restore cancelled.")
-					return
-				}
 				fmt.Println()
 			}
 		}
@@ -390,33 +397,12 @@ func restoreCmd(dbPath, title string) {
 	fmt.Println(brief.Brief)
 }
 
-// findSessionCLI fuzzy-matches a title against checkpointed sessions:
-// exact match first, then substring. Exits if no match found.
-func findSessionCLI(database *db.Database, title string) *db.Session {
+// findSessionCLI matches a session ID or title without guessing between
+// multiple matches.
+func findSessionCLI(database *db.Database, query string) (*db.Session, error) {
 	sessions, err := database.ListSessions("")
 	if err != nil {
-		fmt.Printf("Failed to list sessions: %v\n", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("list sessions: %w", err)
 	}
-
-	q := strings.ToLower(strings.TrimSpace(title))
-	var submatches []*db.Session
-	for _, s := range sessions {
-		t := strings.ToLower(s.Title)
-		if t == q {
-			return s // exact match wins immediately
-		}
-		if strings.Contains(t, q) {
-			submatches = append(submatches, s)
-		}
-	}
-	if len(submatches) > 0 {
-		if len(submatches) > 1 {
-			fmt.Printf("Multiple sessions match %q — using most recent: %s\n\n", title, submatches[0].Title)
-		}
-		return submatches[0]
-	}
-	fmt.Printf("Session not found: %s\n", title)
-	os.Exit(1)
-	return nil
+	return sessionmatch.Find(sessions, query)
 }

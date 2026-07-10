@@ -99,7 +99,43 @@ func backup(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path+".handshake.bak", data, 0600)
+	return writeFileAtomic(path+".handshake.bak", data, 0600)
+}
+
+// writeFileAtomic replaces path only after the complete contents have been
+// written and synced to a temporary file in the same directory. Existing file
+// permissions are preserved so agent config files keep their original access.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	if info, err := os.Stat(path); err == nil {
+		perm = info.Mode().Perm()
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	defer tmp.Close()
+
+	if err := tmp.Chmod(perm); err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 // --- Claude Code MCP registration ---
@@ -181,7 +217,9 @@ func registerClaudeCodeHooks(homeDir string) {
 
 	// Earlier versions wrote hook config to ~/.claude/hooks.json, which Claude
 	// Code never reads. Strip our stale entries so they don't confuse anyone.
-	removeHandshakeHooksFromConfig(filepath.Join(homeDir, ".claude", "hooks.json"))
+	if _, err := removeHandshakeHooksFromConfig(filepath.Join(homeDir, ".claude", "hooks.json")); err != nil {
+		fmt.Printf("- Claude Code hooks: could not clean legacy hooks.json: %v\n", err)
+	}
 }
 
 func registerClaudeCodeHooksConfig(settingsPath, python, preCompactPath, postCompactPath, stopPath string) {
@@ -193,8 +231,11 @@ func registerClaudeCodeHooksConfig(settingsPath, python, preCompactPath, postCom
 			printClaudeCodeHooksSnippet(python, preCompactPath, postCompactPath, stopPath)
 			return
 		}
-	} else {
+	} else if os.IsNotExist(err) {
 		config = map[string]any{}
+	} else {
+		fmt.Printf("✗ Claude Code hooks: could not read settings.json: %v\n", err)
+		return
 	}
 
 	hooks, _ := config["hooks"].(map[string]any)
@@ -260,7 +301,13 @@ func registerClaudeCodeHooksConfig(settingsPath, python, preCompactPath, postCom
 	config["hooks"] = hooks
 
 	if _, err := os.Stat(settingsPath); err == nil {
-		backup(settingsPath)
+		if err := backup(settingsPath); err != nil {
+			fmt.Printf("✗ Claude Code hooks: could not back up settings.json, not modifying it: %v\n", err)
+			return
+		}
+	} else if !os.IsNotExist(err) {
+		fmt.Printf("✗ Claude Code hooks: could not inspect settings.json: %v\n", err)
+		return
 	}
 
 	if err := writeJSON(settingsPath, config); err != nil {
@@ -284,14 +331,23 @@ func printClaudeCodeHooksSnippet(python, preCompactPath, postCompactPath, stopPa
 }
 
 func deregisterClaudeCodeHooks(homeDir string) {
+	removed, err := removeHandshakeHooksFromConfig(filepath.Join(homeDir, ".claude", "settings.json"))
+	if err != nil {
+		fmt.Printf("✗ Claude Code hooks: could not update settings.json: %v\n", err)
+		return
+	}
+	// Legacy location from versions that wrote hooks.json (never read by Claude Code).
+	legacyRemoved, err := removeHandshakeHooksFromConfig(filepath.Join(homeDir, ".claude", "hooks.json"))
+	if err != nil {
+		fmt.Printf("✗ Claude Code hooks: could not update legacy hooks.json: %v\n", err)
+		return
+	}
+	removed = legacyRemoved || removed
+
 	hooksDir := filepath.Join(homeDir, ".claude", "hooks")
 	os.Remove(filepath.Join(hooksDir, "handshake_pre_compact.py"))
 	os.Remove(filepath.Join(hooksDir, "handshake_post_compact.py"))
 	os.Remove(filepath.Join(hooksDir, "handshake_stop.py"))
-
-	removed := removeHandshakeHooksFromConfig(filepath.Join(homeDir, ".claude", "settings.json"))
-	// Legacy location from versions that wrote hooks.json (never read by Claude Code).
-	removed = removeHandshakeHooksFromConfig(filepath.Join(homeDir, ".claude", "hooks.json")) || removed
 
 	if removed {
 		fmt.Println("✓ Claude Code hooks: removed")
@@ -301,21 +357,24 @@ func deregisterClaudeCodeHooks(homeDir string) {
 }
 
 // removeHandshakeHooksFromConfig strips handshake hook entries from the given
-// hooks config file. Returns true if anything was removed.
-func removeHandshakeHooksFromConfig(configPath string) bool {
+// hooks config file. It returns whether anything was removed.
+func removeHandshakeHooksFromConfig(configPath string) (bool, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return false
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
 	}
 
 	var config map[string]any
 	if err := json.Unmarshal(data, &config); err != nil {
-		return false
+		return false, fmt.Errorf("invalid JSON: %w", err)
 	}
 
 	hooks, _ := config["hooks"].(map[string]any)
 	if hooks == nil {
-		return false
+		return false, nil
 	}
 
 	removed := false
@@ -355,13 +414,17 @@ func removeHandshakeHooksFromConfig(configPath string) bool {
 	}
 
 	if !removed {
-		return false
+		return false, nil
 	}
 
 	config["hooks"] = hooks
-	backup(configPath)
-	writeJSON(configPath, config)
-	return true
+	if err := backup(configPath); err != nil {
+		return false, fmt.Errorf("back up config: %w", err)
+	}
+	if err := writeJSON(configPath, config); err != nil {
+		return false, fmt.Errorf("write config: %w", err)
+	}
+	return true, nil
 }
 
 // --- OpenCode MCP registration ---
@@ -739,7 +802,7 @@ func registerHermes(homeDir string) {
 		fmt.Printf("✗ Hermes: could not back up config, not modifying it: %v\n", err)
 		return
 	}
-	if err := os.WriteFile(configPath, []byte(output), 0600); err != nil {
+	if err := writeFileAtomic(configPath, []byte(output), 0600); err != nil {
 		fmt.Printf("✗ Hermes: could not write config: %v\n", err)
 		return
 	}
@@ -770,7 +833,7 @@ func deregisterHermes(homeDir string) {
 		fmt.Printf("✗ Hermes: could not back up config, not modifying it: %v\n", err)
 		return
 	}
-	if err := os.WriteFile(configPath, []byte(strings.Join(updated, "\n")), 0600); err != nil {
+	if err := writeFileAtomic(configPath, []byte(strings.Join(updated, "\n")), 0600); err != nil {
 		fmt.Printf("✗ Hermes: could not write config: %v\n", err)
 		return
 	}
@@ -816,14 +879,11 @@ func deregisterHermesPlugin(homeDir string) {
 // --- Helpers ---
 
 func writeJSON(path string, v any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0644)
+	return writeFileAtomic(path, append(data, '\n'), 0644)
 }
 
 func indent(s, prefix string) string {
@@ -880,11 +940,7 @@ func registerCodexMCP(homeDir string) {
 	data, err := os.ReadFile(configPath)
 	if os.IsNotExist(err) {
 		snippet := fmt.Sprintf("[mcp_servers.handshake]\nurl = %q\n", mcpURL())
-		if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
-			fmt.Printf("✗ Codex: could not create config directory: %v\n", err)
-			return
-		}
-		if err := os.WriteFile(configPath, []byte(snippet), 0644); err != nil {
+		if err := writeFileAtomic(configPath, []byte(snippet), 0644); err != nil {
 			fmt.Printf("✗ Codex: could not create config.toml: %v\n", err)
 			return
 		}
@@ -905,7 +961,7 @@ func registerCodexMCP(homeDir string) {
 		fmt.Printf("✗ Codex: could not back up config.toml: %v\n", err)
 		return
 	}
-	if err := os.WriteFile(configPath, []byte(output+snippet), 0644); err != nil {
+	if err := writeFileAtomic(configPath, []byte(output+snippet), 0644); err != nil {
 		fmt.Printf("✗ Codex: could not write config.toml: %v\n", err)
 		return
 	}
@@ -939,7 +995,7 @@ func deregisterCodexMCP(homeDir string) {
 		return
 	}
 
-	if err := os.WriteFile(configPath, []byte(strings.Join(filtered, "\n")), 0644); err != nil {
+	if err := writeFileAtomic(configPath, []byte(strings.Join(filtered, "\n")), 0644); err != nil {
 		fmt.Printf("✗ Codex: could not write config.toml: %v\n", err)
 		return
 	}
@@ -998,8 +1054,11 @@ func registerCodexHooksConfig(hooksConfigPath, python, preCompactPath, postCompa
 			fmt.Println("- Codex hooks: hooks.json is not valid JSON; add manually")
 			return
 		}
-	} else {
+	} else if os.IsNotExist(err) {
 		config = map[string]any{}
+	} else {
+		fmt.Printf("✗ Codex hooks: could not read hooks.json: %v\n", err)
+		return
 	}
 
 	hooks, _ := config["hooks"].(map[string]any)
@@ -1063,7 +1122,13 @@ func registerCodexHooksConfig(hooksConfigPath, python, preCompactPath, postCompa
 	config["hooks"] = hooks
 
 	if _, err := os.Stat(hooksConfigPath); err == nil {
-		backup(hooksConfigPath)
+		if err := backup(hooksConfigPath); err != nil {
+			fmt.Printf("✗ Codex hooks: could not back up hooks.json, not modifying it: %v\n", err)
+			return
+		}
+	} else if !os.IsNotExist(err) {
+		fmt.Printf("✗ Codex hooks: could not inspect hooks.json: %v\n", err)
+		return
 	}
 
 	if err := writeJSON(hooksConfigPath, config); err != nil {
@@ -1077,64 +1142,22 @@ func registerCodexHooksConfig(hooksConfigPath, python, preCompactPath, postCompa
 
 // deregisterCodexHooks removes hook scripts and entries from hooks.json.
 func deregisterCodexHooks(homeDir string) {
-	// fmt.Println("DEBUG: running deregisterCodexHooks")
+	hooksConfigPath := filepath.Join(homeDir, ".codex", "hooks.json")
+	removed, err := removeHandshakeHooksFromConfig(hooksConfigPath)
+	if err != nil {
+		fmt.Printf("✗ Codex hooks: could not update hooks.json: %v\n", err)
+		return
+	}
+
 	hooksDir := filepath.Join(homeDir, ".codex", "hooks")
 	os.Remove(filepath.Join(hooksDir, "handshake_pre_compact.py"))
 	os.Remove(filepath.Join(hooksDir, "handshake_post_compact.py"))
 	os.Remove(filepath.Join(hooksDir, "handshake_stop.py"))
 
-	hooksConfigPath := filepath.Join(homeDir, ".codex", "hooks.json")
-	data, err := os.ReadFile(hooksConfigPath)
-	if err != nil {
+	if removed {
+		fmt.Println("✓ Codex hooks: removed")
+	} else {
 		fmt.Println("✓ Codex hooks: nothing to remove")
-		return
 	}
-
-	var config map[string]any
-	if err := json.Unmarshal(data, &config); err != nil {
-		return
-	}
-
-	hooks, _ := config["hooks"].(map[string]any)
-	if hooks == nil {
-		return
-	}
-
-	for _, key := range []string{"PreCompact", "PostCompact", "Stop"} {
-		entries, _ := hooks[key].([]any)
-		var filtered []any
-		for _, entry := range entries {
-			em, ok := entry.(map[string]any)
-			if !ok {
-				filtered = append(filtered, entry)
-				continue
-			}
-			hooksArr, _ := em["hooks"].([]any)
-			isHandshake := false
-			for _, h := range hooksArr {
-				hm, ok := h.(map[string]any)
-				if !ok {
-					continue
-				}
-				if cmd, ok := hm["command"].(string); ok && strings.Contains(cmd, "handshake") {
-					isHandshake = true
-					break
-				}
-			}
-			if !isHandshake {
-				filtered = append(filtered, entry)
-			}
-		}
-		if len(filtered) == 0 {
-			delete(hooks, key)
-		} else {
-			hooks[key] = filtered
-		}
-	}
-
-	config["hooks"] = hooks
-	backup(hooksConfigPath)
-	writeJSON(hooksConfigPath, config)
-	fmt.Println("✓ Codex hooks: removed")
 	deregisterCodexMCP(homeDir)
 }

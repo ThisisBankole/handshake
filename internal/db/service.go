@@ -229,7 +229,8 @@ func scanSearchResults(rows *sql.Rows) ([]*SearchResult, error) {
 }
 
 // StoreSession inserts or updates a session. created_at is preserved on
-// conflict so re-checkpointing the same session is idempotent.
+// conflict so re-checkpointing the same session is idempotent. Empty fields
+// in a checkpoint do not erase metadata recorded by an earlier checkpoint.
 func (d *Database) StoreSession(session *Session) error {
 	now := time.Now().Unix()
 	if session.CreatedAt == 0 {
@@ -243,10 +244,10 @@ func (d *Database) StoreSession(session *Session) error {
 		`INSERT INTO sessions (id, title, agent, working_dir, model, summary, decisions, git_state, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
-       title       = excluded.title,
-       agent       = excluded.agent,
-       working_dir = excluded.working_dir,
-       model       = excluded.model,
+       title       = CASE WHEN excluded.title != '' THEN excluded.title ELSE sessions.title END,
+       agent       = CASE WHEN excluded.agent != '' THEN excluded.agent ELSE sessions.agent END,
+       working_dir = CASE WHEN excluded.working_dir != '' THEN excluded.working_dir ELSE sessions.working_dir END,
+       model       = CASE WHEN excluded.model != '' THEN excluded.model ELSE sessions.model END,
        summary     = CASE WHEN excluded.summary != '' THEN excluded.summary ELSE sessions.summary END,
        decisions   = CASE WHEN excluded.decisions != '' THEN excluded.decisions ELSE sessions.decisions END,
        git_state   = CASE WHEN excluded.git_state != '' THEN excluded.git_state ELSE sessions.git_state END,

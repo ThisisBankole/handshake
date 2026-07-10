@@ -58,3 +58,89 @@ func TestConcurrentWrites_AllSucceed(t *testing.T) {
 		t.Fatalf("got %d sessions, want %d", len(sessions), n)
 	}
 }
+
+func TestStoreSession_PreservesMetadataFromPartialCheckpoint(t *testing.T) {
+	d, err := New(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	defer d.Close()
+
+	if err := d.StoreSession(&Session{
+		ID:         "session-1",
+		Title:      "Fix login flow",
+		Agent:      "claude",
+		WorkingDir: "/projects/app",
+		Model:      "claude-sonnet",
+	}); err != nil {
+		t.Fatalf("initial StoreSession failed: %v", err)
+	}
+
+	if err := d.StoreSession(&Session{ID: "session-1"}); err != nil {
+		t.Fatalf("partial StoreSession failed: %v", err)
+	}
+
+	session, err := d.GetSession("session-1")
+	if err != nil {
+		t.Fatalf("GetSession failed: %v", err)
+	}
+
+	if session.Title != "Fix login flow" {
+		t.Errorf("Title = %q, want %q", session.Title, "Fix login flow")
+	}
+	if session.Agent != "claude" {
+		t.Errorf("Agent = %q, want %q", session.Agent, "claude")
+	}
+	if session.WorkingDir != "/projects/app" {
+		t.Errorf("WorkingDir = %q, want %q", session.WorkingDir, "/projects/app")
+	}
+	if session.Model != "claude-sonnet" {
+		t.Errorf("Model = %q, want %q", session.Model, "claude-sonnet")
+	}
+}
+
+func TestStoreSession_ReplacesMetadataWhenProvided(t *testing.T) {
+	d, err := New(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	defer d.Close()
+
+	if err := d.StoreSession(&Session{
+		ID:         "session-1",
+		Title:      "Initial title",
+		Agent:      "claude",
+		WorkingDir: "/projects/old-app",
+		Model:      "claude-haiku",
+	}); err != nil {
+		t.Fatalf("initial StoreSession failed: %v", err)
+	}
+
+	if err := d.StoreSession(&Session{
+		ID:         "session-1",
+		Title:      "Updated title",
+		Agent:      "codex",
+		WorkingDir: "/projects/new-app",
+		Model:      "gpt-5",
+	}); err != nil {
+		t.Fatalf("updated StoreSession failed: %v", err)
+	}
+
+	session, err := d.GetSession("session-1")
+	if err != nil {
+		t.Fatalf("GetSession failed: %v", err)
+	}
+
+	if session.Title != "Updated title" {
+		t.Errorf("Title = %q, want %q", session.Title, "Updated title")
+	}
+	if session.Agent != "codex" {
+		t.Errorf("Agent = %q, want %q", session.Agent, "codex")
+	}
+	if session.WorkingDir != "/projects/new-app" {
+		t.Errorf("WorkingDir = %q, want %q", session.WorkingDir, "/projects/new-app")
+	}
+	if session.Model != "gpt-5" {
+		t.Errorf("Model = %q, want %q", session.Model, "gpt-5")
+	}
+}

@@ -129,3 +129,21 @@ func TestSyncAgentUnknown(t *testing.T) {
 		t.Fatal("expected an error for an unknown agent")
 	}
 }
+
+func TestSyncWarnings_ReportsFatalAndPartialFailures(t *testing.T) {
+	warnings := SyncWarnings([]SyncResult{
+		{Agent: "claude-code", Err: fmt.Errorf("storage unavailable")},
+		{Agent: "codex", Failed: 2},
+		{Agent: "opencode", Imported: 1},
+	})
+
+	if len(warnings) != 2 {
+		t.Fatalf("warning count = %d, want 2: %v", len(warnings), warnings)
+	}
+	if warnings[0] != "claude-code: storage unavailable" {
+		t.Errorf("warning 0 = %q", warnings[0])
+	}
+	if warnings[1] != "codex: 2 session(s) failed to import" {
+		t.Errorf("warning 1 = %q", warnings[1])
+	}
+}

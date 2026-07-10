@@ -69,7 +69,7 @@ That's it. The receiving agent picks up with full context.
 There's also a CLI:
 ```bash
 handshake list
-handshake restore "my session title"
+handshake handoff "my session title"
 ```
 
 ## Manual checkpoint

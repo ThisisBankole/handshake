@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
+	"handshake/internal/adapters"
 	"handshake/internal/db"
 	"handshake/internal/git"
 )
@@ -71,6 +73,24 @@ func newTestDB(t *testing.T) *db.Database {
 		}
 	}
 	return database
+}
+
+func TestSyncSummary_NamesFailingAgent(t *testing.T) {
+	summary := syncSummary([]adapters.SyncResult{
+		{Agent: "codex", Imported: 1, Failed: 2},
+		{Agent: "opencode", Err: errors.New("storage unavailable")},
+	})
+
+	for _, want := range []string{
+		"1 new",
+		"3 failed",
+		"codex: 2 session(s) failed to import",
+		"opencode: storage unavailable",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Errorf("syncSummary missing %q: %q", want, summary)
+		}
+	}
 }
 
 // harness runs the UI on a tcell simulation screen.

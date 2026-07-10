@@ -70,16 +70,13 @@ func Ingest(database *db.Database, session *SessionData) error {
 }
 
 // IngestCodexSessions reads all sessions from the Codex session index
-// and ingests any that are not already in the canonical DB.
+// and ingests any that are not already in the canonical DB. The result lets
+// callers report partial or fatal failures while still using imported data.
 // Called during list_sessions so Codex sessions appear without needing
 // an explicit checkpoint first — same behaviour as OpenCode's plugin
 // auto-sync and Claude Code's JSONL watcher.
-func IngestCodexSessions(database *db.Database, homeDir string) error {
-	res := SyncAgent(database, homeDir, "codex")
-	if res.Err != nil {
-		return fmt.Errorf("failed to list Codex sessions: %w", res.Err)
-	}
-	return nil
+func IngestCodexSessions(database *db.Database, homeDir string) SyncResult {
+	return SyncAgent(database, homeDir, "codex")
 }
 
 // truncate shortens s to at most n runes, appending an ellipsis when cut.

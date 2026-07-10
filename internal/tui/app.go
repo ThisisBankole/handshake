@@ -62,12 +62,15 @@ type ui struct {
 // returned so the caller can print the handoff brief once the terminal is
 // back to normal; nil means the user just quit.
 func Run(database *db.Database, homeDir string) (*db.Session, error) {
-	// Best-effort Codex sync, same as `handshake list`.
-	adapters.IngestCodexSessions(database, homeDir)
+	// Keep sessions that did import, but show any Codex sync failure in the UI.
+	codexSync := adapters.IngestCodexSessions(database, homeDir)
 
 	u, err := newUI(database, homeDir)
 	if err != nil {
 		return nil, err
+	}
+	if warnings := adapters.SyncWarnings([]adapters.SyncResult{codexSync}); len(warnings) > 0 {
+		u.status.SetText(tag(colYellow) + "warning: " + tview.Escape(strings.Join(warnings, "; ")) + " ")
 	}
 	if err := u.app.Run(); err != nil {
 		return nil, err
@@ -800,7 +803,7 @@ func (u *ui) openConfirm(s *db.Session) {
 		tag(colGreen)+"y"+tag(colFaint)+" restore & print brief · "+tag(colRed)+"esc"+tag(colFaint)+" cancel")
 }
 
-// restorePacket rebuilds the git restore packet shown by `handshake restore`.
+// restorePacket rebuilds the git restore packet shown by `handshake handoff`.
 func restorePacket(s *db.Session) string {
 	if s.GitState == "" {
 		return ""
@@ -1035,11 +1038,15 @@ func syncSummary(results []adapters.SyncResult) string {
 	if failed > 0 {
 		parts = append(parts, fmt.Sprintf("%d failed", failed))
 	}
+	warnings := adapters.SyncWarnings(results)
+	if len(warnings) > 0 {
+		parts = append(parts, "warning: "+strings.Join(warnings, "; "))
+	}
 	if len(parts) == 0 {
 		return tag(colFaint) + "pull: nothing new "
 	}
 	col := colGreen
-	if imported+updated == 0 {
+	if imported+updated == 0 || len(warnings) > 0 {
 		col = colYellow
 	}
 	return tag(col) + "pull: " + strings.Join(parts, " · ") + " "
@@ -1097,7 +1104,7 @@ func helpText() string {
 	section("command line")
 	fmt.Fprintf(&b, "  %s%s[-]%s   import sessions without opening the TUI\n",
 		tag(colAccent2), tview.Escape("handshake pull [agent]"), tag(colText))
-	fmt.Fprintf(&b, "  %shandshake restore <title>[-]%s print a session's handoff brief\n",
+	fmt.Fprintf(&b, "  %shandshake handoff <id|title>[-]%s print a session's handoff brief\n",
 		tag(colAccent2), tag(colText))
 	return b.String()
 }

@@ -15,6 +15,7 @@ import (
 	"handshake/internal/db"
 	"handshake/internal/engine"
 	"handshake/internal/git"
+	"handshake/internal/sessionmatch"
 )
 
 // Server bundles the canonical database, the MCP tool surface, and the plain
@@ -82,7 +83,7 @@ func (s *Server) addTools() {
 
 	s.mcp.AddTool(
 		mcp.NewTool("list_sessions",
-			mcp.WithDescription("List recent checkpointed sessions as human-readable titles with relative timestamps"),
+			mcp.WithDescription("List recent checkpointed sessions with IDs, titles, and relative timestamps"),
 			mcp.WithString("agent",
 				mcp.Description("Filter by agent type (optional)"),
 				mcp.Enum("claude-code", "opencode", "hermes"),
@@ -95,9 +96,9 @@ func (s *Server) addTools() {
 
 	s.mcp.AddTool(
 		mcp.NewTool("restore_session",
-			mcp.WithDescription("Restore a session by title (fuzzy matched). First call returns a restore packet showing git drift since checkpoint. Call again with confirmed=true to inject the handoff brief."),
+			mcp.WithDescription("Restore a session by exact ID or unambiguous title. First call returns a restore packet showing git drift since checkpoint. Call again with confirmed=true to inject the handoff brief."),
 			mcp.WithString("title",
-				mcp.Description("Title (or part of the title) of the session to restore"),
+				mcp.Description("Exact session ID, title, or part of a title. Use list_sessions to get an ID when a title is ambiguous."),
 				mcp.Required(),
 			),
 			mcp.WithBoolean("confirmed",
@@ -215,7 +216,7 @@ func (s *Server) handleCheckpointSession(request mcp.CallToolRequest) (*mcp.Call
 
 	return mcp.NewToolResultText(fmt.Sprintf(
 		"Session '%s' checkpointed (%d messages). Restore it from another agent with restore_session(\"%s\").",
-		sessionData.Title, len(sessionData.Messages), sessionData.Title)), nil
+		sessionData.Title, len(sessionData.Messages), sessionData.ID)), nil
 }
 
 func (s *Server) readNativeSession(agent, sessionID string) (*adapters.SessionData, error) {
@@ -235,9 +236,11 @@ func (s *Server) readNativeSession(agent, sessionID string) (*adapters.SessionDa
 
 func (s *Server) handleListSessions(request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	agent := request.GetString("agent", "")
+	var warnings []string
 
 	if agent == "" || agent == "codex" {
-		adapters.IngestCodexSessions(s.db, s.homeDir)
+		result := adapters.IngestCodexSessions(s.db, s.homeDir)
+		warnings = adapters.SyncWarnings([]adapters.SyncResult{result})
 	}
 
 	sessions, err := s.db.ListSessions(agent)
@@ -245,13 +248,20 @@ func (s *Server) handleListSessions(request mcp.CallToolRequest) (*mcp.CallToolR
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	if len(sessions) == 0 {
-		return mcp.NewToolResultText("No sessions found"), nil
+		message := "No sessions found"
+		if len(warnings) > 0 {
+			message += "\nWarning: " + strings.Join(warnings, "; ")
+		}
+		return mcp.NewToolResultText(message), nil
 	}
 
 	var b strings.Builder
 	b.WriteString("Recent sessions:\n")
 	for _, session := range sessions {
-		fmt.Fprintf(&b, "- %s (%s, %s)\n", session.Title, session.Agent, relativeTime(session.UpdatedAt))
+		fmt.Fprintf(&b, "- %s | %s (%s, %s)\n", session.ID, session.Title, session.Agent, relativeTime(session.UpdatedAt))
+	}
+	if len(warnings) > 0 {
+		b.WriteString("Warning: " + strings.Join(warnings, "; ") + "\n")
 	}
 	return mcp.NewToolResultText(b.String()), nil
 }
@@ -264,7 +274,7 @@ func (s *Server) handleBriefRequest(request mcp.CallToolRequest, restore bool) (
 
 	confirmed := request.GetBool("confirmed", false)
 
-	session, alternatives, err := s.findSessionByTitle(title)
+	session, err := s.findSession(title)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -276,9 +286,6 @@ func (s *Server) handleBriefRequest(request mcp.CallToolRequest, restore bool) (
 			var b strings.Builder
 			b.WriteString(packet)
 			b.WriteString("\n\nReview the drift above, then call restore_session again with confirmed=true to inject the handoff brief.")
-			if len(alternatives) > 0 {
-				b.WriteString("\n_Note: other sessions also matched: " + strings.Join(alternatives, "; ") + "_")
-			}
 			return mcp.NewToolResultText(b.String()), nil
 		}
 	}
@@ -293,9 +300,6 @@ func (s *Server) handleBriefRequest(request mcp.CallToolRequest, restore bool) (
 		fmt.Fprintf(&b, "Restoring session '%s'. Continue the work described in this handoff brief:\n\n", session.Title)
 	}
 	b.WriteString(brief.Brief)
-	if len(alternatives) > 0 {
-		b.WriteString("\n_Note: other sessions also matched: " + strings.Join(alternatives, "; ") + "_\n")
-	}
 	return mcp.NewToolResultText(b.String()), nil
 }
 
@@ -314,60 +318,14 @@ func (s *Server) buildRestorePacket(session *db.Session) string {
 	return git.BuildRestorePacket(session.Title, session.Agent, session.UpdatedAt, workingDir, &checkpoint, session.Summary, session.Decisions)
 }
 
-// findSessionByTitle fuzzy-matches a title against checkpointed sessions:
-// exact match first, then substring, then all-words. Among equal matches the
-// most recently updated session wins; the rest are reported as alternatives.
-func (s *Server) findSessionByTitle(query string) (*db.Session, []string, error) {
+// findSession resolves an ID or title without choosing between multiple
+// candidates. The caller must request an exact ID when a title is ambiguous.
+func (s *Server) findSession(query string) (*db.Session, error) {
 	sessions, err := s.db.ListSessions("")
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-
-	q := strings.ToLower(strings.TrimSpace(query))
-	words := strings.Fields(q)
-
-	var exact, substr, allWords []*db.Session
-	for _, session := range sessions {
-		t := strings.ToLower(session.Title)
-		switch {
-		case t == q:
-			exact = append(exact, session)
-		case strings.Contains(t, q):
-			substr = append(substr, session)
-		case containsAllWords(t, words):
-			allWords = append(allWords, session)
-		}
-	}
-
-	matches := exact
-	if len(matches) == 0 {
-		matches = substr
-	}
-	if len(matches) == 0 {
-		matches = allWords
-	}
-	if len(matches) == 0 {
-		return nil, nil, fmt.Errorf("no session matching %q — use list_sessions to see what is available", query)
-	}
-
-	// ListSessions orders by updated_at DESC, so matches[0] is the most recent.
-	var alternatives []string
-	for _, m := range matches[1:] {
-		alternatives = append(alternatives, fmt.Sprintf("%s (%s, %s)", m.Title, m.Agent, relativeTime(m.UpdatedAt)))
-	}
-	return matches[0], alternatives, nil
-}
-
-func containsAllWords(title string, words []string) bool {
-	if len(words) == 0 {
-		return false
-	}
-	for _, w := range words {
-		if !strings.Contains(title, w) {
-			return false
-		}
-	}
-	return true
+	return sessionmatch.Find(sessions, query)
 }
 
 func (s *Server) handleSearchSession(request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -378,7 +336,7 @@ func (s *Server) handleSearchSession(request mcp.CallToolRequest) (*mcp.CallTool
 		return mcp.NewToolResultError("title and query are required"), nil
 	}
 
-	session, _, err := s.findSessionByTitle(title)
+	session, err := s.findSession(title)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}

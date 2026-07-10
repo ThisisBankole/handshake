@@ -28,6 +28,21 @@ type SyncResult struct {
 // Total returns how many sessions the sync actually wrote.
 func (r SyncResult) Total() int { return r.Imported + r.Updated }
 
+// SyncWarnings summarizes failures without discarding successful work from
+// other agents or sessions in the same pull.
+func SyncWarnings(results []SyncResult) []string {
+	var warnings []string
+	for _, result := range results {
+		if result.Err != nil {
+			warnings = append(warnings, fmt.Sprintf("%s: %v", result.Agent, result.Err))
+		}
+		if result.Failed > 0 {
+			warnings = append(warnings, fmt.Sprintf("%s: %d session(s) failed to import", result.Agent, result.Failed))
+		}
+	}
+	return warnings
+}
+
 // SyncAll pulls sessions from every pullable agent's native storage into the
 // canonical database. Agents whose storage is absent report zero scanned.
 func SyncAll(database *db.Database, homeDir string) []SyncResult {
