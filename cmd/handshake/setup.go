@@ -197,7 +197,7 @@ func uninstallCmd(homeDir string) {
 
 	// Remove from all agents
 	fmt.Println("Removing Handshake from each agent:")
-	deregisterClaudeCode()
+	deregisterClaudeCode(homeDir)
 	deregisterOpenCode(homeDir)
 	deregisterHermes(homeDir)
 	removeOpenCodePlugin(homeDir)
@@ -371,7 +371,7 @@ func handshakeAt(addr string) bool {
 func registerAgentsIndented(homeDir string) {
 	// Temporarily redirect stdout prefix — simplest is just call register
 	// functions directly; they already print their own status lines.
-	registerClaudeCode()
+	registerClaudeCode(homeDir)
 	registerOpenCode(homeDir)
 	registerHermes(homeDir)
 }

@@ -16,7 +16,7 @@ import (
 )
 
 func registerAgents(homeDir string) {
-	registerClaudeCode()
+	registerClaudeCode(homeDir)
 	registerOpenCode(homeDir)
 	registerHermes(homeDir)
 	registerCodexMCP(homeDir)
@@ -24,7 +24,7 @@ func registerAgents(homeDir string) {
 
 func deregisterAgents(homeDir string, deleteDB bool) {
 	fmt.Println("Removing Handshake from each agent:")
-	deregisterClaudeCode()
+	deregisterClaudeCode(homeDir)
 	deregisterOpenCode(homeDir)
 	deregisterHermes(homeDir)
 	removeOpenCodePlugin(homeDir)
@@ -140,41 +140,132 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 
 // --- Claude Code MCP registration ---
 
-func registerClaudeCode() {
-	if _, err := exec.LookPath("claude"); err != nil {
-		fmt.Println("- Claude Code: CLI not found — register manually with:")
-		fmt.Printf("    claude mcp add -s user --transport http handshake %s\n", mcpURL())
+func registerClaudeCode(homeDir string) {
+	if _, err := exec.LookPath("claude"); err == nil {
+		// Remove any existing registration (ignore "not found") then re-add with the
+		// current URL, so re-running setup corrects a stale port instead of leaving
+		// the old URL in place via an "already registered" short-circuit.
+		exec.Command("claude", "mcp", "remove", "-s", "user", "handshake").Run()
+		out, err := exec.Command("claude", "mcp", "add", "-s", "user", "--transport", "http", "handshake", mcpURL()).CombinedOutput()
+		if err != nil {
+			fmt.Printf("✗ Claude Code: claude mcp add failed: %s\n", strings.TrimSpace(string(out)))
+			return
+		}
+		fmt.Println("✓ Claude Code: registered (via claude mcp add)")
 		return
 	}
-	// Remove any existing registration (ignore "not found") then re-add with the
-	// current URL, so re-running setup corrects a stale port instead of leaving
-	// the old URL in place via an "already registered" short-circuit.
-	exec.Command("claude", "mcp", "remove", "-s", "user", "handshake").Run()
-	out, err := exec.Command("claude", "mcp", "add", "-s", "user", "--transport", "http", "handshake", mcpURL()).CombinedOutput()
-	if err != nil {
-		fmt.Printf("✗ Claude Code: claude mcp add failed: %s\n", strings.TrimSpace(string(out)))
+
+	if !hasClaudeCodeLocal(homeDir) {
+		fmt.Println("- Claude Code: not installed, skipping")
 		return
 	}
-	fmt.Println("✓ Claude Code: registered (via claude mcp add)")
+	registerClaudeCodeMCPConfig(homeDir)
 }
 
-func deregisterClaudeCode() {
-	if _, err := exec.LookPath("claude"); err != nil {
-		fmt.Println("- Claude Code: CLI not found — remove manually with:")
-		fmt.Println("    claude mcp remove -s user handshake")
+func hasClaudeCodeLocal(homeDir string) bool {
+	for _, path := range []string{
+		filepath.Join(homeDir, ".claude"),
+		filepath.Join(homeDir, ".claude.json"),
+		filepath.Join(homeDir, "Library", "Application Support", "Claude"),
+		"/Applications/Claude.app",
+		filepath.Join(homeDir, "Applications", "Claude.app"),
+	} {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// registerClaudeCodeMCPConfig supports Claude Desktop users, who may not have
+// the separate claude CLI installed but still read ~/.claude.json.
+func registerClaudeCodeMCPConfig(homeDir string) {
+	configPath := filepath.Join(homeDir, ".claude.json")
+	config := map[string]any{}
+	data, err := os.ReadFile(configPath)
+	if err == nil {
+		if err := json.Unmarshal(data, &config); err != nil {
+			fmt.Println("- Claude Code: ~/.claude.json is not valid JSON; skipping MCP registration")
+			return
+		}
+	} else if !os.IsNotExist(err) {
+		fmt.Printf("✗ Claude Code: could not read ~/.claude.json: %v\n", err)
 		return
 	}
-	if err := exec.Command("claude", "mcp", "get", "handshake").Run(); err != nil {
-		fmt.Println("✓ Claude Code: not registered, nothing to do")
+
+	mcpServers, _ := config["mcpServers"].(map[string]any)
+	if mcpServers == nil {
+		mcpServers = map[string]any{}
+	}
+	mcpServers["handshake"] = map[string]any{"type": "http", "url": mcpURL()}
+	config["mcpServers"] = mcpServers
+
+	if err == nil {
+		if err := backup(configPath); err != nil {
+			fmt.Printf("✗ Claude Code: could not back up ~/.claude.json: %v\n", err)
+			return
+		}
+	}
+	if err := writeJSON(configPath, config); err != nil {
+		fmt.Printf("✗ Claude Code: could not write ~/.claude.json: %v\n", err)
 		return
 	}
-	out, err := exec.Command("claude", "mcp", "remove", "-s", "user", "handshake").CombinedOutput()
+	fmt.Println("✓ Claude Code: registered (desktop configuration)")
+}
+
+func deregisterClaudeCode(homeDir string) {
+	if _, err := exec.LookPath("claude"); err == nil {
+		if err := exec.Command("claude", "mcp", "get", "handshake").Run(); err != nil {
+			fmt.Println("✓ Claude Code: not registered, nothing to do")
+			return
+		}
+		out, err := exec.Command("claude", "mcp", "remove", "-s", "user", "handshake").CombinedOutput()
+		if err != nil {
+			fmt.Printf("✗ Claude Code: claude mcp remove failed: %s\n", strings.TrimSpace(string(out)))
+			fmt.Println("  Remove manually with: claude mcp remove -s user handshake")
+			return
+		}
+		fmt.Println("✓ Claude Code: removed")
+		return
+	}
+	deregisterClaudeCodeMCPConfig(homeDir)
+}
+
+func deregisterClaudeCodeMCPConfig(homeDir string) {
+	configPath := filepath.Join(homeDir, ".claude.json")
+	data, err := os.ReadFile(configPath)
+	if os.IsNotExist(err) {
+		fmt.Println("✓ Claude Code: no configuration found, nothing to remove")
+		return
+	}
 	if err != nil {
-		fmt.Printf("✗ Claude Code: claude mcp remove failed: %s\n", strings.TrimSpace(string(out)))
-		fmt.Println("  Remove manually with: claude mcp remove -s user handshake")
+		fmt.Printf("✗ Claude Code: could not read ~/.claude.json: %v\n", err)
 		return
 	}
-	fmt.Println("✓ Claude Code: removed")
+
+	var config map[string]any
+	if err := json.Unmarshal(data, &config); err != nil {
+		fmt.Println("- Claude Code: ~/.claude.json is not valid JSON; remove Handshake manually")
+		return
+	}
+	mcpServers, _ := config["mcpServers"].(map[string]any)
+	if _, exists := mcpServers["handshake"]; !exists {
+		fmt.Println("✓ Claude Code: Handshake not registered, nothing to remove")
+		return
+	}
+	delete(mcpServers, "handshake")
+	if len(mcpServers) == 0 {
+		delete(config, "mcpServers")
+	}
+	if err := backup(configPath); err != nil {
+		fmt.Printf("✗ Claude Code: could not back up ~/.claude.json: %v\n", err)
+		return
+	}
+	if err := writeJSON(configPath, config); err != nil {
+		fmt.Printf("✗ Claude Code: could not write ~/.claude.json: %v\n", err)
+		return
+	}
+	fmt.Println("✓ Claude Code: removed (desktop configuration)")
 }
 
 // --- Claude Code hooks (PreCompact + PostCompact) ---
@@ -927,15 +1018,43 @@ func removeCodexMCPBlock(lines []string) []string {
 	return filtered
 }
 
+func codexHome(homeDir string) string {
+	if configured := os.Getenv("CODEX_HOME"); configured != "" {
+		return configured
+	}
+	return filepath.Join(homeDir, ".codex")
+}
+
+func hasCodexLocal(homeDir string) bool {
+	if _, err := exec.LookPath("codex"); err == nil {
+		return true
+	}
+	if os.Getenv("CODEX_HOME") != "" {
+		return true
+	}
+	for _, path := range []string{
+		codexHome(homeDir),
+		"/Applications/ChatGPT.app",
+		filepath.Join(homeDir, "Applications", "ChatGPT.app"),
+		"/Applications/Codex.app",
+		filepath.Join(homeDir, "Applications", "Codex.app"),
+	} {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // registerCodexMCP registers Handshake as an MCP server in ~/.codex/config.toml.
 // Removes any stale [mcp_servers.handshake] block first, then appends fresh.
 func registerCodexMCP(homeDir string) {
-	if _, err := exec.LookPath("codex"); err != nil {
+	if !hasCodexLocal(homeDir) {
 		fmt.Println("- Codex: not installed, skipping")
 		return
 	}
 
-	configPath := filepath.Join(homeDir, ".codex", "config.toml")
+	configPath := filepath.Join(codexHome(homeDir), "config.toml")
 
 	data, err := os.ReadFile(configPath)
 	if os.IsNotExist(err) {
@@ -970,8 +1089,7 @@ func registerCodexMCP(homeDir string) {
 
 // deregisterCodexMCP removes the Handshake MCP entry from ~/.codex/config.toml.
 func deregisterCodexMCP(homeDir string) {
-	//fmt.Println("DEBUG: running deregisterCodexMCP")
-	configPath := filepath.Join(homeDir, ".codex", "config.toml")
+	configPath := filepath.Join(codexHome(homeDir), "config.toml")
 
 	data, err := os.ReadFile(configPath)
 	if os.IsNotExist(err) {
@@ -1007,9 +1125,9 @@ func deregisterCodexMCP(homeDir string) {
 // registerCodexHooks installs the three hook scripts and registers them
 // in ~/.codex/hooks.json.
 func registerCodexHooks(homeDir string) {
-	// Check if codex is installed
-	if _, err := exec.LookPath("codex"); err != nil {
-		return // silently skip — codex not installed
+	if !hasCodexLocal(homeDir) {
+		fmt.Println("- Codex hooks: Codex desktop or CLI not found, skipping")
+		return
 	}
 
 	python := resolvePython()
@@ -1019,7 +1137,7 @@ func registerCodexHooks(homeDir string) {
 		return
 	}
 
-	hooksDir := filepath.Join(homeDir, ".codex", "hooks")
+	hooksDir := filepath.Join(codexHome(homeDir), "hooks")
 	if err := os.MkdirAll(hooksDir, 0755); err != nil {
 		fmt.Printf("✗ Codex hooks: could not create hooks directory: %v\n", err)
 		return
@@ -1042,7 +1160,7 @@ func registerCodexHooks(homeDir string) {
 		return
 	}
 
-	hooksConfigPath := filepath.Join(homeDir, ".codex", "hooks.json")
+	hooksConfigPath := filepath.Join(codexHome(homeDir), "hooks.json")
 	registerCodexHooksConfig(hooksConfigPath, python, preCompactPath, postCompactPath, stopPath)
 }
 
@@ -1142,14 +1260,14 @@ func registerCodexHooksConfig(hooksConfigPath, python, preCompactPath, postCompa
 
 // deregisterCodexHooks removes hook scripts and entries from hooks.json.
 func deregisterCodexHooks(homeDir string) {
-	hooksConfigPath := filepath.Join(homeDir, ".codex", "hooks.json")
+	hooksConfigPath := filepath.Join(codexHome(homeDir), "hooks.json")
 	removed, err := removeHandshakeHooksFromConfig(hooksConfigPath)
 	if err != nil {
 		fmt.Printf("✗ Codex hooks: could not update hooks.json: %v\n", err)
 		return
 	}
 
-	hooksDir := filepath.Join(homeDir, ".codex", "hooks")
+	hooksDir := filepath.Join(codexHome(homeDir), "hooks")
 	os.Remove(filepath.Join(hooksDir, "handshake_pre_compact.py"))
 	os.Remove(filepath.Join(hooksDir, "handshake_post_compact.py"))
 	os.Remove(filepath.Join(hooksDir, "handshake_stop.py"))
