@@ -52,6 +52,70 @@ Takes about 30 seconds. Handshake registers with your agents, installs
 itself as a login service, and starts the daemon. After that it runs
 invisibly in the background.
 
+## Testing
+
+Run the regular suite from the repository root:
+
+```bash
+go test ./...
+```
+
+On Apple silicon Macs with the Apple Container CLI, run the same suite in a
+clean Linux environment:
+
+```bash
+# One-time machine setup
+container system start
+
+# Builds an isolated image and runs the tests without mounting your home directory.
+sh scripts/test-container.sh
+```
+
+The container test installs Go and Git, copies only the repository source into
+the image, and runs `go test ./...`. It does not mount your Handshake database
+or agent configuration, so it is suitable for migration and release checks.
+
+## Project Knowledge
+
+Each Git-aware checkpoint also writes a private, deterministic OKF-compatible
+bundle at `~/.handshake/knowledge/<project-id>/`. It contains checkpoint and
+Git timelines plus size-limited, per-file text diffs. Session transcripts are
+not exported. Sensitive and generated paths are omitted and recorded as such
+in each diff index.
+
+Agents can publish a `project-brief.md` and `repo-map.md` through the local
+`publish_project_knowledge` MCP tool. Each document declares the factual
+revision it used; Handshake rejects stale output and marks published documents
+stale after later checkpoints.
+
+Optionally enable a background writer to keep these two AI-authored documents
+current without asking the interactive agent to do the work:
+
+```bash
+handshake knowledge author setup
+handshake knowledge author show
+```
+
+Setup detects Claude Code, Codex, OpenCode, and Hermes, then asks you to
+approve one writer because its model runs may consume quota. The daemon starts
+that CLI after a short checkpoint debounce and verifies that it published both
+documents for the latest factual revision. It never trusts terminal output as
+proof of success. Disable background model runs at any time with:
+
+```bash
+handshake knowledge author off
+```
+
+`handshake setup` and `handshake init` install Handshake's
+`knowledge-authoring` skill into the global skill location for Claude Code,
+Codex, OpenCode, and Hermes. Existing user-owned skills with the same name are
+left untouched. Skill installation makes the workflow available to an agent;
+Claude Code also receives one Stop-hook continuation when a checkpoint leaves
+these documents stale, directing it to use the skill before the turn ends.
+OpenCode, Codex, and Hermes have the skill available as well. Background
+authoring uses the corresponding non-interactive CLI command, so it works even
+when that agent is not the one currently being used interactively.
+
 ## Switching agents
 
 When you want to continue work in a different agent:

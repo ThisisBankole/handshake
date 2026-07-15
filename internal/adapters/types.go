@@ -2,8 +2,11 @@ package adapters
 
 import (
 	"fmt"
+	"path/filepath"
 
+	"handshake/internal/authoring"
 	"handshake/internal/db"
+	"handshake/internal/knowledge"
 )
 
 // SessionData is the intermediate representation an adapter produces from an
@@ -30,7 +33,7 @@ type MessageData struct {
 }
 
 // Ingest normalises a SessionData into the canonical database.
-func Ingest(database *db.Database, session *SessionData) error {
+func Ingest(database *db.Database, knowledgeRoot string, session *SessionData) error {
 	if session.ID == "" {
 		return fmt.Errorf("session has no ID")
 	}
@@ -50,7 +53,8 @@ func Ingest(database *db.Database, session *SessionData) error {
 		CreatedAt:  session.CreatedAt,
 		UpdatedAt:  session.UpdatedAt,
 	}
-	if err := database.StoreSession(canonical); err != nil {
+	state, err := knowledge.RecordCheckpoint(database, canonical)
+	if err != nil {
 		return err
 	}
 
@@ -63,6 +67,15 @@ func Ingest(database *db.Database, session *SessionData) error {
 			CreatedAt: msg.CreatedAt,
 		}); err != nil {
 			return err
+		}
+	}
+	if canonical.ProjectID != "" && knowledgeRoot != "" {
+		if _, err := knowledge.NewWriter(database, knowledgeRoot).WriteProject(canonical.ProjectID); err != nil {
+			return fmt.Errorf("write knowledge bundle: %w", err)
+		}
+		homeDir := filepath.Dir(filepath.Dir(knowledgeRoot))
+		if err := authoring.Schedule(database, homeDir, canonical.ProjectID, state); err != nil {
+			return fmt.Errorf("schedule knowledge authoring: %w", err)
 		}
 	}
 

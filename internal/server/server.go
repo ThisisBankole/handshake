@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -12,9 +13,11 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"handshake/internal/adapters"
+	"handshake/internal/authoring"
 	"handshake/internal/db"
 	"handshake/internal/engine"
 	"handshake/internal/git"
+	"handshake/internal/knowledge"
 	"handshake/internal/sessionmatch"
 )
 
@@ -45,6 +48,7 @@ func (s *Server) Serve(addr string) error {
 	mux.Handle("/mcp", mcpserver.NewStreamableHTTPServer(s.mcp))
 	mux.HandleFunc("/ingest", s.handleIngest)
 	mux.HandleFunc("/generate-brief", s.handleGenerateBrief)
+	mux.HandleFunc("/knowledge-authoring-check", s.handleKnowledgeAuthoringCheck)
 	mux.HandleFunc("/sync", s.handleSync)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -78,6 +82,32 @@ func (s *Server) addTools() {
 		),
 		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			return s.handleCheckpointSession(request)
+		},
+	)
+
+	s.mcp.AddTool(
+		mcp.NewTool("get_project_knowledge_context",
+			mcp.WithDescription("Get the project ID, current factual revision, and AI-document freshness for a working directory. Call this before authoring project knowledge."),
+			mcp.WithString("working_dir", mcp.Description("Repository or project working directory"), mcp.Required()),
+		),
+		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return s.handleGetProjectKnowledgeContext(request)
+		},
+	)
+
+	s.mcp.AddTool(
+		mcp.NewTool("publish_project_knowledge",
+			mcp.WithDescription("Publish an AI-authored project brief or repository map based on a specific factual knowledge revision. Rejects stale revisions so older agent output cannot overwrite current project knowledge."),
+			mcp.WithString("project_id", mcp.Description("Handshake project ID from the project's knowledge bundle"), mcp.Required()),
+			mcp.WithString("type", mcp.Description("Document type"), mcp.Enum(db.KnowledgeDocumentProjectBrief, db.KnowledgeDocumentRepoMap), mcp.Required()),
+			mcp.WithNumber("facts_revision", mcp.Description("The factual revision used to author this document"), mcp.Required()),
+			mcp.WithString("content", mcp.Description("Markdown body only; Handshake adds verified provenance frontmatter"), mcp.Required()),
+			mcp.WithString("source_session_id", mcp.Description("Optional source session ID that informed the document")),
+			mcp.WithString("source_commit", mcp.Description("Optional Git commit used as evidence")),
+			mcp.WithString("evidence", mcp.Description("Optional short description of factual documents consulted")),
+		),
+		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return s.handlePublishProjectKnowledge(request)
 		},
 	)
 
@@ -164,6 +194,44 @@ func (s *Server) addTools() {
 	)
 }
 
+func (s *Server) handleGetProjectKnowledgeContext(request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	context, err := knowledge.GetProjectContext(s.db, request.GetString("working_dir", ""))
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Project ID: %s\nFacts revision: %d\nKnowledge status: %s\n", context.ProjectID, context.State.FactsRevision, context.State.Status)
+	b.WriteString("Bundle documents:\n- index.md\n- log.md\n- git-timeline.md\n- diffs/index.md\n")
+	if len(context.Documents) > 0 {
+		b.WriteString("AI-authored documents:\n")
+		for _, document := range context.Documents {
+			fmt.Fprintf(&b, "- %s: %s (%s, facts revision %d)\n", document.Type, document.Path, document.Status, document.FactsRevision)
+		}
+	}
+	return mcp.NewToolResultText(b.String()), nil
+}
+
+func (s *Server) handlePublishProjectKnowledge(request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	projectID := request.GetString("project_id", "")
+	documentType := request.GetString("type", "")
+	content := request.GetString("content", "")
+	factsRevision := int64(request.GetInt("facts_revision", 0))
+	state, err := knowledge.NewWriter(s.db, filepath.Join(s.homeDir, ".handshake", "knowledge")).PublishDocument(&knowledge.DocumentInput{
+		ProjectID:       projectID,
+		Type:            documentType,
+		FactsRevision:   factsRevision,
+		Content:         content,
+		SourceSessionID: request.GetString("source_session_id", ""),
+		SourceCommit:    request.GetString("source_commit", ""),
+		Evidence:        request.GetString("evidence", ""),
+		GeneratedBy:     "mcp-agent",
+	})
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultText(fmt.Sprintf("Published %s for project %s at facts revision %d (knowledge status: %s).", documentType, projectID, state.FactsRevision, state.Status)), nil
+}
+
 func (s *Server) handleCheckpointSession(request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	sessionID := request.GetString("session_id", "")
 	agent := request.GetString("agent", "")
@@ -180,8 +248,18 @@ func (s *Server) handleCheckpointSession(request mcp.CallToolRequest) (*mcp.Call
 		if title == "" {
 			title = agent + " session " + sessionID
 		}
-		if storeErr := s.db.StoreSession(&db.Session{ID: sessionID, Title: title, Agent: agent, Summary: summary, Decisions: decisions}); storeErr != nil {
+		metadataSession := &db.Session{ID: sessionID, Title: title, Agent: agent, Summary: summary, Decisions: decisions}
+		state, storeErr := knowledge.RecordCheckpoint(s.db, metadataSession)
+		if storeErr != nil {
 			return mcp.NewToolResultError(storeErr.Error()), nil
+		}
+		if metadataSession.ProjectID != "" {
+			if _, writeErr := knowledge.NewWriter(s.db, filepath.Join(s.homeDir, ".handshake", "knowledge")).WriteProject(metadataSession.ProjectID); writeErr != nil {
+				return mcp.NewToolResultError(writeErr.Error()), nil
+			}
+			if scheduleErr := authoring.Schedule(s.db, s.homeDir, metadataSession.ProjectID, state); scheduleErr != nil {
+				return mcp.NewToolResultError(scheduleErr.Error()), nil
+			}
 		}
 		return mcp.NewToolResultText(fmt.Sprintf(
 			"Session '%s' checkpointed (metadata only — could not read native storage: %v)", title, err)), nil
@@ -210,7 +288,7 @@ func (s *Server) handleCheckpointSession(request mcp.CallToolRequest) (*mcp.Call
 		}
 	}
 
-	if err := adapters.Ingest(s.db, sessionData); err != nil {
+	if err := adapters.Ingest(s.db, filepath.Join(s.homeDir, ".handshake", "knowledge"), sessionData); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
@@ -300,7 +378,39 @@ func (s *Server) handleBriefRequest(request mcp.CallToolRequest, restore bool) (
 		fmt.Fprintf(&b, "Restoring session '%s'. Continue the work described in this handoff brief:\n\n", session.Title)
 	}
 	b.WriteString(brief.Brief)
+	if restore {
+		s.waitForKnowledgeAuthoring(session.ProjectID)
+		if projectContext := knowledge.BuildRestoreContext(s.db, filepath.Join(s.homeDir, ".handshake", "knowledge"), session); projectContext != "" {
+			b.WriteString("\n\n")
+			b.WriteString(projectContext)
+		}
+	}
 	return mcp.NewToolResultText(b.String()), nil
+}
+
+// waitForKnowledgeAuthoring gives an already-running background writer a
+// short chance to publish fresh documents. Restore always remains bounded and
+// BuildRestoreContext still excludes stale output after this window.
+func (s *Server) waitForKnowledgeAuthoring(projectID string) {
+	if projectID == "" {
+		return
+	}
+	config, err := authoring.LoadConfig(s.homeDir)
+	if err != nil || !config.Enabled {
+		return
+	}
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		state, err := s.db.GetKnowledgeState(projectID)
+		if err != nil || state.Status == db.KnowledgeCurrent {
+			return
+		}
+		job, err := s.db.GetKnowledgeAuthoringJob(projectID)
+		if err != nil || (job.State != db.KnowledgeAuthoringJobPending && job.State != db.KnowledgeAuthoringJobRunning) {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
 // buildRestorePacket decodes the stored git state for a session, captures

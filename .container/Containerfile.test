@@ -1,0 +1,15 @@
+FROM golang:1.25.5-alpine
+
+RUN apk add --no-cache git
+
+WORKDIR /workspace
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+ENV CGO_ENABLED=0 \
+    GOCACHE=/tmp/go-build
+
+CMD ["go", "test", "./..."]

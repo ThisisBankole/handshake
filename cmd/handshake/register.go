@@ -20,6 +20,7 @@ func registerAgents(homeDir string) {
 	registerOpenCode(homeDir)
 	registerHermes(homeDir)
 	registerCodexMCP(homeDir)
+	printKnowledgeSkillInstallResults(installKnowledgeAuthoringSkills(homeDir))
 }
 
 func deregisterAgents(homeDir string, deleteDB bool) {
@@ -32,6 +33,7 @@ func deregisterAgents(homeDir string, deleteDB bool) {
 	deregisterHermesPlugin(homeDir)
 	deregisterCodexHooks(homeDir)
 	deregisterCodexMCP(homeDir)
+	removeKnowledgeAuthoringSkills(homeDir)
 
 	dbPath := filepath.Join(homeDir, ".handshake", "sessions.db")
 	if deleteDB {

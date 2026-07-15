@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -11,8 +12,11 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+var ErrSessionNotFound = errors.New("session not found")
+
 type Session struct {
 	ID         string
+	ProjectID  string
 	Title      string
 	Agent      string
 	WorkingDir string
@@ -40,6 +44,93 @@ type Brief struct {
 	SessionID   string
 	Content     string
 	GeneratedAt int64
+}
+
+// Project identifies one logical codebase. Remote-backed projects can span
+// local clones; local-only projects are scoped to a canonical directory.
+type Project struct {
+	ID        string
+	RemoteURL string
+	LocalOnly bool
+	CreatedAt int64
+	UpdatedAt int64
+}
+
+// ProjectInstance identifies one local clone or worktree of a project.
+type ProjectInstance struct {
+	ID        string
+	ProjectID string
+	RootPath  string
+	CreatedAt int64
+	UpdatedAt int64
+}
+
+// GitSnapshot is an immutable factual checkpoint. It intentionally keeps the
+// source summary and decisions alongside the Git state that produced them.
+type GitSnapshot struct {
+	ID              int64
+	ProjectID       string
+	InstanceID      string
+	SessionID       string
+	Fingerprint     string
+	HasGit          bool
+	Commit          string
+	Branch          string
+	Message         string
+	Status          string
+	RemoteURL       string
+	Summary         string
+	Decisions       string
+	SourceUpdatedAt int64
+	CapturedAt      int64
+}
+
+const (
+	KnowledgeRefreshPending = "refresh-pending"
+	KnowledgeCurrent        = "current"
+	KnowledgeFactsAIStale   = "facts-current-ai-stale"
+
+	KnowledgeDocumentProjectBrief = "project-brief"
+	KnowledgeDocumentRepoMap      = "repo-map"
+	KnowledgeDocumentCurrent      = "current"
+	KnowledgeDocumentStale        = "stale"
+)
+
+// KnowledgeState compares the latest deterministic facts with the facts
+// represented by the most recent AI-authored knowledge document.
+type KnowledgeState struct {
+	ProjectID      string
+	FactsRevision  int64
+	AIRevision     int64
+	Status         string
+	LastSnapshotID int64
+	UpdatedAt      int64
+}
+
+// KnowledgeDocument records provenance for a future OKF document. The
+// document writer is introduced in the next phase; this schema establishes
+// the provenance contract now.
+type KnowledgeDocument struct {
+	ProjectID       string
+	Path            string
+	Type            string
+	FactsRevision   int64
+	SourceSessionID string
+	SourceCommit    string
+	Evidence        string
+	Status          string
+	ContentHash     string
+	GeneratedBy     string
+	GeneratedAt     int64
+}
+
+// KnowledgeCheckpoint is the one transactional input for a session update,
+// its project identity, and its immutable factual snapshot.
+type KnowledgeCheckpoint struct {
+	Session  *Session
+	Project  *Project
+	Instance *ProjectInstance
+	Snapshot *GitSnapshot
 }
 
 type Database struct {
@@ -107,6 +198,87 @@ func (d *Database) initSchema() error {
 
 	CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT);
 
+	CREATE TABLE IF NOT EXISTS projects (
+		id          TEXT PRIMARY KEY,
+		remote_url  TEXT NOT NULL DEFAULT '',
+		local_only  INTEGER NOT NULL DEFAULT 0,
+		created_at  INTEGER NOT NULL,
+		updated_at  INTEGER NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS project_instances (
+		id          TEXT PRIMARY KEY,
+		project_id  TEXT NOT NULL,
+		root_path   TEXT NOT NULL,
+		created_at  INTEGER NOT NULL,
+		updated_at  INTEGER NOT NULL,
+		FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+	);
+	CREATE INDEX IF NOT EXISTS idx_project_instances_project ON project_instances(project_id);
+
+	CREATE TABLE IF NOT EXISTS git_snapshots (
+		id                INTEGER PRIMARY KEY AUTOINCREMENT,
+		project_id        TEXT NOT NULL,
+		instance_id       TEXT NOT NULL,
+		session_id        TEXT NOT NULL,
+		fingerprint       TEXT NOT NULL,
+		has_git           INTEGER NOT NULL DEFAULT 0,
+		commit_hash       TEXT NOT NULL DEFAULT '',
+		branch            TEXT NOT NULL DEFAULT '',
+		message           TEXT NOT NULL DEFAULT '',
+		worktree_status   TEXT NOT NULL DEFAULT '',
+		remote_url        TEXT NOT NULL DEFAULT '',
+		summary           TEXT NOT NULL DEFAULT '',
+		decisions         TEXT NOT NULL DEFAULT '',
+		source_updated_at INTEGER NOT NULL DEFAULT 0,
+		captured_at       INTEGER NOT NULL,
+		FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+		FOREIGN KEY (instance_id) REFERENCES project_instances(id) ON DELETE CASCADE,
+		FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+	);
+	CREATE INDEX IF NOT EXISTS idx_git_snapshots_project ON git_snapshots(project_id, id DESC);
+	CREATE INDEX IF NOT EXISTS idx_git_snapshots_session ON git_snapshots(session_id, id DESC);
+
+	CREATE TABLE IF NOT EXISTS knowledge_state (
+		project_id       TEXT PRIMARY KEY,
+		facts_revision   INTEGER NOT NULL DEFAULT 0,
+		ai_revision      INTEGER NOT NULL DEFAULT 0,
+		status           TEXT NOT NULL,
+		last_snapshot_id INTEGER NOT NULL DEFAULT 0,
+		updated_at       INTEGER NOT NULL,
+		FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+	);
+
+	CREATE TABLE IF NOT EXISTS knowledge_documents (
+		project_id        TEXT NOT NULL,
+		path              TEXT NOT NULL,
+		type              TEXT NOT NULL,
+		facts_revision    INTEGER NOT NULL,
+		source_session_id TEXT NOT NULL DEFAULT '',
+		source_commit     TEXT NOT NULL DEFAULT '',
+		evidence          TEXT NOT NULL DEFAULT '',
+		status            TEXT NOT NULL,
+		content_hash      TEXT NOT NULL DEFAULT '',
+		generated_by      TEXT NOT NULL DEFAULT '',
+		generated_at      INTEGER NOT NULL,
+		PRIMARY KEY (project_id, path),
+		FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+	);
+
+	CREATE TABLE IF NOT EXISTS knowledge_authoring_jobs (
+		project_id      TEXT PRIMARY KEY,
+		target_revision INTEGER NOT NULL,
+		state           TEXT NOT NULL,
+		attempts        INTEGER NOT NULL DEFAULT 0,
+		not_before      INTEGER NOT NULL DEFAULT 0,
+		claimed_at      INTEGER NOT NULL DEFAULT 0,
+		last_error      TEXT NOT NULL DEFAULT '',
+		updated_at      INTEGER NOT NULL,
+		FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+	);
+	CREATE INDEX IF NOT EXISTS idx_knowledge_authoring_jobs_due
+		ON knowledge_authoring_jobs(state, not_before, updated_at);
+
 	CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 		content,
 		content='messages',
@@ -144,6 +316,17 @@ func (d *Database) initSchema() error {
 	if _, err := d.db.Exec("ALTER TABLE sessions ADD COLUMN decisions TEXT NOT NULL DEFAULT ''"); err != nil &&
 		!strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("failed to migrate sessions decisions: %w", err)
+	}
+
+	// Existing databases gain an initially empty project link. Historical sessions are
+	// linked lazily when their working directory is observed again; this avoids
+	// fabricating Git history that Handshake never captured.
+	if _, err := d.db.Exec("ALTER TABLE sessions ADD COLUMN project_id TEXT NOT NULL DEFAULT ''"); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("failed to migrate sessions project_id: %w", err)
+	}
+	if _, err := d.db.Exec("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)"); err != nil {
+		return fmt.Errorf("failed to index session projects: %w", err)
 	}
 
 	// Populate FTS index from messages that existed before the FTS table was added.
@@ -231,7 +414,7 @@ func scanSearchResults(rows *sql.Rows) ([]*SearchResult, error) {
 // StoreSession inserts or updates a session. created_at is preserved on
 // conflict so re-checkpointing the same session is idempotent. Empty fields
 // in a checkpoint do not erase metadata recorded by an earlier checkpoint.
-func (d *Database) StoreSession(session *Session) error {
+func prepareSession(session *Session) {
 	now := time.Now().Unix()
 	if session.CreatedAt == 0 {
 		session.CreatedAt = now
@@ -239,12 +422,19 @@ func (d *Database) StoreSession(session *Session) error {
 	if session.UpdatedAt == 0 {
 		session.UpdatedAt = now
 	}
+}
 
-	_, err := d.db.Exec(
-		`INSERT INTO sessions (id, title, agent, working_dir, model, summary, decisions, git_state, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(id) DO UPDATE SET
-       title       = CASE WHEN excluded.title != '' THEN excluded.title ELSE sessions.title END,
+type sqlExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func storeSession(exec sqlExecer, session *Session) error {
+	_, err := exec.Exec(
+		`INSERT INTO sessions (id, project_id, title, agent, working_dir, model, summary, decisions, git_state, created_at, updated_at)
+	     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	     ON CONFLICT(id) DO UPDATE SET
+	       project_id  = CASE WHEN excluded.project_id != '' THEN excluded.project_id ELSE sessions.project_id END,
+	       title       = CASE WHEN excluded.title != '' THEN excluded.title ELSE sessions.title END,
        agent       = CASE WHEN excluded.agent != '' THEN excluded.agent ELSE sessions.agent END,
        working_dir = CASE WHEN excluded.working_dir != '' THEN excluded.working_dir ELSE sessions.working_dir END,
        model       = CASE WHEN excluded.model != '' THEN excluded.model ELSE sessions.model END,
@@ -252,13 +442,20 @@ func (d *Database) StoreSession(session *Session) error {
        decisions   = CASE WHEN excluded.decisions != '' THEN excluded.decisions ELSE sessions.decisions END,
        git_state   = CASE WHEN excluded.git_state != '' THEN excluded.git_state ELSE sessions.git_state END,
        updated_at  = excluded.updated_at`,
-		session.ID, session.Title, session.Agent, session.WorkingDir, session.Model, session.Summary, session.Decisions, session.GitState, session.CreatedAt, session.UpdatedAt,
+		session.ID, session.ProjectID, session.Title, session.Agent, session.WorkingDir, session.Model, session.Summary, session.Decisions, session.GitState, session.CreatedAt, session.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to store session: %w", err)
 	}
 
 	return nil
+}
+
+// StoreSession inserts or updates session metadata without creating a
+// knowledge snapshot. Adapters should prefer RecordKnowledgeCheckpoint.
+func (d *Database) StoreSession(session *Session) error {
+	prepareSession(session)
+	return storeSession(d.db, session)
 }
 
 func (d *Database) StoreMessage(message *Message) error {
@@ -284,14 +481,14 @@ func (d *Database) StoreMessage(message *Message) error {
 
 func (d *Database) GetSession(id string) (*Session, error) {
 	row := d.db.QueryRow(
-		"SELECT id, title, agent, working_dir, model, summary, decisions, git_state, created_at, updated_at FROM sessions WHERE id = ?",
+		"SELECT id, project_id, title, agent, working_dir, model, summary, decisions, git_state, created_at, updated_at FROM sessions WHERE id = ?",
 		id,
 	)
 
 	session := &Session{}
-	if err := row.Scan(&session.ID, &session.Title, &session.Agent, &session.WorkingDir, &session.Model, &session.Summary, &session.Decisions, &session.GitState, &session.CreatedAt, &session.UpdatedAt); err != nil {
+	if err := row.Scan(&session.ID, &session.ProjectID, &session.Title, &session.Agent, &session.WorkingDir, &session.Model, &session.Summary, &session.Decisions, &session.GitState, &session.CreatedAt, &session.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("session not found")
+			return nil, ErrSessionNotFound
 		}
 		return nil, fmt.Errorf("failed to get session: %w", err)
 	}
@@ -300,7 +497,7 @@ func (d *Database) GetSession(id string) (*Session, error) {
 }
 
 func (d *Database) ListSessions(agent string) ([]*Session, error) {
-	query := "SELECT id, title, agent, working_dir, model, summary, decisions, git_state, created_at, updated_at FROM sessions"
+	query := "SELECT id, project_id, title, agent, working_dir, model, summary, decisions, git_state, created_at, updated_at FROM sessions"
 	args := []any{}
 	if agent != "" {
 		query += " WHERE agent = ?"
@@ -317,7 +514,7 @@ func (d *Database) ListSessions(agent string) ([]*Session, error) {
 	var sessions []*Session
 	for rows.Next() {
 		session := &Session{}
-		if err := rows.Scan(&session.ID, &session.Title, &session.Agent, &session.WorkingDir, &session.Model, &session.Summary, &session.Decisions, &session.GitState, &session.CreatedAt, &session.UpdatedAt); err != nil {
+		if err := rows.Scan(&session.ID, &session.ProjectID, &session.Title, &session.Agent, &session.WorkingDir, &session.Model, &session.Summary, &session.Decisions, &session.GitState, &session.CreatedAt, &session.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("failed to scan session: %w", err)
 		}
 		sessions = append(sessions, session)

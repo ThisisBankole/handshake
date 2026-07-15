@@ -100,6 +100,13 @@ func setupCmd(homeDir, dbPath string) {
 	registerCodexHooks(homeDir)
 
 	fmt.Println()
+	fmt.Println("  Background knowledge writer (optional):")
+	fmt.Println("  A selected agent can update project briefs after checkpoints.")
+	if confirmYN("Configure a background writer now?", false) {
+		authorSetupCmd(homeDir)
+	}
+
+	fmt.Println()
 	fmt.Println("  ✓ Step 1 complete.")
 	fmt.Println()
 
@@ -180,7 +187,7 @@ func setupCmd(homeDir, dbPath string) {
 	fmt.Println("  \"restore my <session_name> session\"")
 	fmt.Println()
 	fmt.Println("Your sessions are stored locally at ~/.handshake/sessions.db")
-	fmt.Println("No cloud. No accounts. No data leaving your machine.")
+	fmt.Println("Session checkpoints stay local. Any enabled background writer uses its selected agent CLI and provider account.")
 	fmt.Println()
 }
 
@@ -204,6 +211,7 @@ func uninstallCmd(homeDir string) {
 	deregisterClaudeCodeHooks(homeDir)
 	deregisterHermesPlugin(homeDir)
 	deregisterCodexHooks(homeDir)
+	removeKnowledgeAuthoringSkills(homeDir)
 	//deregisterCodexMCP(homeDir)
 	fmt.Println()
 
@@ -374,6 +382,7 @@ func registerAgentsIndented(homeDir string) {
 	registerClaudeCode()
 	registerOpenCode(homeDir)
 	registerHermes(homeDir)
+	printKnowledgeSkillInstallResults(installKnowledgeAuthoringSkills(homeDir))
 }
 
 // confirmYN asks the user a yes/no question.
