@@ -65,7 +65,8 @@ func authorSetupCmd(homeDir string) {
 		}
 	}
 	fmt.Printf("\nRecommended writer: %s\n", recommended)
-	fmt.Println("It will run after checkpoints and may consume your model quota.")
+	fmt.Println("It is a safety net: Handshake first gives an active agent time to publish documents.")
+	fmt.Println("It may consume your model quota when that fallback is needed.")
 	if !confirmYN("Enable this background writer?", false) {
 		fmt.Println("Background authoring remains off. Factual checkpoints still work.")
 		return
@@ -97,7 +98,7 @@ func authorSetCmd(homeDir string, runner authoring.Runner) {
 		return
 	}
 	fmt.Printf("Background writer enabled: %s\n", runner)
-	fmt.Println("New factual checkpoints will be authored after the configured debounce period.")
+	fmt.Println("New factual checkpoints give an active agent time to author first; this writer runs only if documents remain stale.")
 }
 
 func authorOffCmd(homeDir string) {

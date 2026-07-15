@@ -98,9 +98,10 @@ handshake knowledge author show
 
 Setup detects Claude Code, Codex, OpenCode, and Hermes, then asks you to
 approve one writer because its model runs may consume quota. The daemon starts
-that CLI after a short checkpoint debounce and verifies that it published both
-documents for the latest factual revision. It never trusts terminal output as
-proof of success. Disable background model runs at any time with:
+that CLI only after an active agent has had a short chance to publish both
+documents itself. Before starting the CLI, Handshake verifies that the
+documents are still stale for the latest factual revision. It never trusts
+terminal output as proof of success. Disable background model runs at any time with:
 
 ```bash
 handshake knowledge author off

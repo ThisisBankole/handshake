@@ -27,9 +27,9 @@ const (
 )
 
 const (
-	defaultDebounce = 30 * time.Second
-	defaultTimeout  = 2 * time.Minute
-	defaultRetries  = 3
+	defaultActiveAgentGrace = 60 * time.Second
+	defaultTimeout          = 2 * time.Minute
+	defaultRetries          = 3
 )
 
 var ErrDisabled = errors.New("knowledge authoring is disabled")
@@ -45,7 +45,7 @@ type Config struct {
 }
 
 func DefaultConfig() Config {
-	return Config{DebounceSeconds: int(defaultDebounce.Seconds()), TimeoutSeconds: int(defaultTimeout.Seconds()), RetryLimit: defaultRetries}
+	return Config{DebounceSeconds: int(defaultActiveAgentGrace.Seconds()), TimeoutSeconds: int(defaultTimeout.Seconds()), RetryLimit: defaultRetries}
 }
 
 func ConfigPath(homeDir string) string {
@@ -278,8 +278,9 @@ func (w *Worker) WithMCPURL(mcpURL string) *Worker {
 	return w
 }
 
-// Schedule records the newest stale factual revision. It is safe to call for
-// every ingest, including duplicate native-agent events.
+// Schedule gives an active agent a short chance to publish fresh documents
+// before the configured background writer becomes the fallback. It is safe to
+// call for every ingest, including duplicate native-agent events.
 func Schedule(database *db.Database, homeDir, projectID string, state *db.KnowledgeState) error {
 	if database == nil || projectID == "" || state == nil || state.Status == db.KnowledgeCurrent {
 		return nil
@@ -288,6 +289,9 @@ func Schedule(database *db.Database, homeDir, projectID string, state *db.Knowle
 	if err != nil {
 		// A malformed optional config must never block factual checkpoints.
 		config = DefaultConfig()
+	}
+	if !config.Enabled {
+		return nil
 	}
 	return database.EnqueueKnowledgeAuthoring(projectID, state.FactsRevision, time.Now().Add(time.Duration(config.DebounceSeconds)*time.Second))
 }
