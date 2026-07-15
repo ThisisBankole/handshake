@@ -100,11 +100,7 @@ func setupCmd(homeDir, dbPath string) {
 	registerCodexHooks(homeDir)
 
 	fmt.Println()
-	fmt.Println("  Background knowledge writer (optional):")
-	fmt.Println("  A selected agent can update project briefs after checkpoints.")
-	if confirmYN("Configure a background writer now?", false) {
-		authorSetupCmd(homeDir)
-	}
+	authorSetupCmd(homeDir)
 
 	fmt.Println()
 	fmt.Println("  ✓ Step 1 complete.")

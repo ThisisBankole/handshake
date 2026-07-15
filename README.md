@@ -43,7 +43,8 @@ cd handshake
 go build -o handshake ./cmd/handshake
 ```
 
-After installing, run the setup wizard:
+When installed through curl in a terminal, the guided setup starts
+automatically. In a non-interactive environment, run it afterwards:
 ```bash
 handshake setup
 ```
@@ -96,12 +97,13 @@ handshake knowledge author setup
 handshake knowledge author show
 ```
 
-Setup detects Claude Code, Codex, OpenCode, and Hermes, then asks you to
-approve one writer because its model runs may consume quota. The daemon starts
-that CLI only after an active agent has had a short chance to publish both
-documents itself. Before starting the CLI, Handshake verifies that the
-documents are still stale for the latest factual revision. It never trusts
-terminal output as proof of success. Disable background model runs at any time with:
+Setup detects Claude Code, Codex, OpenCode, and Hermes, lets you choose one
+fallback writer, and asks for final approval because its model runs may consume
+quota. The daemon starts that CLI only after an active agent has had a short
+chance to publish both documents itself. Before starting the CLI, Handshake
+verifies that the documents are still stale for the latest factual revision. It
+never trusts terminal output as proof of success. Disable background model runs
+at any time with:
 
 ```bash
 handshake knowledge author off

@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,12 +46,23 @@ func knowledgeCmd(homeDir, dbPath string, args []string) {
 }
 
 func authorSetupCmd(homeDir string) {
+	fmt.Println("Project Knowledge")
+	fmt.Println("-----------------")
+	fmt.Println("Keep the project brief, repository map, and handoff documents current.")
+	fmt.Println("An active agent writes first. A fallback writer is used only when those documents remain stale.")
+	if !confirmYN("Enable automatic writing?", false) {
+		fmt.Println("Project knowledge will remain manual. Factual checkpoints still work.")
+		return
+	}
+
+	fmt.Println()
+	fmt.Println("Available fallback writers:")
 	detected := authoring.DetectRunners()
 	var available []authoring.DetectedRunner
 	for _, candidate := range detected {
 		if candidate.Err == nil {
 			available = append(available, candidate)
-			fmt.Printf("  ✓ %s: %s\n", candidate.Runner, candidate.Path)
+			fmt.Printf("  * %s: %s\n", candidate.Runner, candidate.Path)
 		} else {
 			fmt.Printf("  - %s: not found\n", candidate.Runner)
 		}
@@ -57,21 +71,66 @@ func authorSetupCmd(homeDir string) {
 		fmt.Println("No supported authoring CLI was found. Install Claude, Codex, OpenCode, or Hermes, then run this command again.")
 		return
 	}
-	recommended := available[0].Runner
-	for _, candidate := range available {
-		if candidate.Runner == authoring.RunnerClaude {
-			recommended = candidate.Runner
-			break
-		}
-	}
-	fmt.Printf("\nRecommended writer: %s\n", recommended)
-	fmt.Println("It is a safety net: Handshake first gives an active agent time to publish documents.")
-	fmt.Println("It may consume your model quota when that fallback is needed.")
-	if !confirmYN("Enable this background writer?", false) {
-		fmt.Println("Background authoring remains off. Factual checkpoints still work.")
+
+	recommended := recommendedAuthoringRunner(available)
+	runner := chooseAuthoringRunner(available, recommended)
+	fmt.Println()
+	fmt.Println("Automatic Project Knowledge")
+	fmt.Printf("  Fallback writer: %s\n", runner)
+	fmt.Println("  It runs only when the active agent has not refreshed the documents.")
+	fmt.Println("  No model is run while this setting is being configured.")
+	if !confirmYN("Enable automatic writing with this fallback?", false) {
+		fmt.Println("Project knowledge remains manual. Factual checkpoints still work.")
 		return
 	}
-	authorSetCmd(homeDir, recommended)
+	authorSetCmd(homeDir, runner)
+}
+
+func recommendedAuthoringRunner(available []authoring.DetectedRunner) authoring.Runner {
+	for _, candidate := range available {
+		if candidate.Runner == authoring.RunnerClaude {
+			return candidate.Runner
+		}
+	}
+	return available[0].Runner
+}
+
+func chooseAuthoringRunner(available []authoring.DetectedRunner, recommended authoring.Runner) authoring.Runner {
+	defaultChoice := 1
+	fmt.Println()
+	fmt.Println("Choose a fallback writer:")
+	for index, candidate := range available {
+		label := ""
+		if candidate.Runner == recommended {
+			defaultChoice = index + 1
+			label = " (recommended)"
+		}
+		fmt.Printf("  %d. %s%s\n", index+1, candidate.Runner, label)
+	}
+
+	scanner := bufio.NewScanner(os.Stdin)
+	for {
+		fmt.Printf("Choose a fallback writer [%d]: ", defaultChoice)
+		if !scanner.Scan() {
+			return recommended
+		}
+		if runner, ok := parseAuthoringRunnerSelection(scanner.Text(), available, recommended); ok {
+			return runner
+		}
+		fmt.Printf("Enter a number from 1 to %d.\n", len(available))
+	}
+}
+
+func parseAuthoringRunnerSelection(input string, available []authoring.DetectedRunner, fallback authoring.Runner) (authoring.Runner, bool) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return fallback, true
+	}
+	selection, err := strconv.Atoi(input)
+	if err != nil || selection < 1 || selection > len(available) {
+		return "", false
+	}
+	return available[selection-1].Runner, true
 }
 
 func authorSetCmd(homeDir string, runner authoring.Runner) {
@@ -97,8 +156,8 @@ func authorSetCmd(homeDir string, runner authoring.Runner) {
 		fmt.Printf("Could not save authoring configuration: %v\n", err)
 		return
 	}
-	fmt.Printf("Background writer enabled: %s\n", runner)
-	fmt.Println("New factual checkpoints give an active agent time to author first; this writer runs only if documents remain stale.")
+	fmt.Printf("Automatic project knowledge enabled with %s as the fallback writer.\n", runner)
+	fmt.Println("The active agent writes first; the fallback writer runs only if documents remain stale.")
 }
 
 func authorOffCmd(homeDir string) {
@@ -112,7 +171,7 @@ func authorOffCmd(homeDir string) {
 		fmt.Printf("Could not save authoring configuration: %v\n", err)
 		return
 	}
-	fmt.Println("Background writer disabled. Factual checkpoints continue to be recorded.")
+	fmt.Println("Automatic project knowledge disabled. Factual checkpoints continue to be recorded.")
 }
 
 func authorTestCmd(homeDir string, runner authoring.Runner) {
@@ -148,13 +207,12 @@ func authorShowCmd(homeDir, dbPath string) {
 	if config.Enabled {
 		status = "on"
 	}
-	fmt.Printf("Background writer: %s\n", status)
+	fmt.Printf("Automatic project knowledge: %s\n", status)
 	runner := string(config.Runner)
 	if runner == "" {
 		runner = "not selected"
 	}
-	fmt.Printf("Runner: %s\n", runner)
-	fmt.Printf("Debounce: %ds; timeout: %ds; retries: %d\n", config.DebounceSeconds, config.TimeoutSeconds, config.RetryLimit)
+	fmt.Printf("Fallback writer: %s\n", runner)
 	database := openDB(dbPath)
 	defer database.Close()
 	jobs, err := database.ListKnowledgeAuthoringJobs()
