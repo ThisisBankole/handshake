@@ -177,12 +177,6 @@ func setupCmd(homeDir, dbPath string) {
 	fmt.Println("│  All done. Handshake is ready.              │")
 	fmt.Println("╚─────────────────────────────────────────────╝")
 	fmt.Println()
-	fmt.Println("In Claude Code, OpenCode, or Hermes just say:")
-	fmt.Println()
-	fmt.Println("  \"checkpoint this session\"")
-	fmt.Println("  \"list my sessions\"")
-	fmt.Println("  \"restore my <session_name> session\"")
-	fmt.Println()
 	fmt.Println("Your sessions are stored locally at ~/.handshake/sessions.db")
 	fmt.Println("Session checkpoints stay local. Any enabled background writer uses its selected agent CLI and provider account.")
 	fmt.Println()
@@ -375,14 +369,24 @@ func handshakeAt(addr string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-// registerAgentsIndented runs agent registration with indented output.
+type agentRegistration struct {
+	name     string
+	register func(string)
+}
+
+var setupAgentRegistrations = []agentRegistration{
+	{name: "Claude Code", register: registerClaudeCode},
+	{name: "OpenCode", register: registerOpenCode},
+	{name: "Hermes", register: registerHermes},
+	{name: "Codex", register: registerCodexMCP},
+	{name: "Cursor", register: registerCursor},
+}
+
+// registerAgentsIndented runs the standard agent registrations.
 func registerAgentsIndented(homeDir string) {
-	// Temporarily redirect stdout prefix — simplest is just call register
-	// functions directly; they already print their own status lines.
-	registerClaudeCode(homeDir)
-	registerOpenCode(homeDir)
-	registerHermes(homeDir)
-	registerCursor(homeDir)
+	for _, agent := range setupAgentRegistrations {
+		agent.register(homeDir)
+	}
 	printKnowledgeSkillInstallResults(installKnowledgeAuthoringSkills(homeDir))
 	printKnowledgeSkillInstallResults(installHandshakeSkills(homeDir))
 }

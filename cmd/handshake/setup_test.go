@@ -7,6 +7,15 @@ import (
 	"testing"
 )
 
+func TestSetupAgentRegistrationsIncludeCodex(t *testing.T) {
+	for _, agent := range setupAgentRegistrations {
+		if agent.name == "Codex" {
+			return
+		}
+	}
+	t.Fatal("setup agent registrations do not include Codex")
+}
+
 func newIPv4TestServer(t *testing.T, handler http.Handler) *httptest.Server {
 	t.Helper()
 
