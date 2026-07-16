@@ -282,7 +282,7 @@ func registerClaudeCodeHooks(homeDir string) {
 	python := resolvePython()
 	if python == "" {
 		fmt.Println("- Claude Code hooks: Python 3 not found on PATH — skipping auto-checkpoint hooks")
-		fmt.Println("    Install Python 3 to enable automatic syncing, or checkpoint manually with \"checkpoint this session\".")
+		fmt.Println("    Install Python 3 to enable automatic syncing.")
 		return
 	}
 
@@ -1352,7 +1352,7 @@ func registerCodexHooks(homeDir string) {
 	python := resolvePython()
 	if python == "" {
 		fmt.Println("- Codex hooks: Python 3 not found on PATH — skipping auto-checkpoint hooks")
-		fmt.Println("    Install Python 3 to enable automatic syncing, or checkpoint manually with \"checkpoint this session\".")
+		fmt.Println("    Install Python 3 to enable automatic syncing.")
 		return
 	}
 
