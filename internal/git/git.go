@@ -66,6 +66,16 @@ func CaptureState(workingDir string) (*State, error) {
 	return state, nil
 }
 
+// RepositoryRoot returns the canonical root of the repository containing
+// workingDir. A non-Git directory is a normal absence, not an error.
+func RepositoryRoot(workingDir string) (string, bool, error) {
+	root, err := output(workingDir, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", false, nil
+	}
+	return root, true, nil
+}
+
 // CommitsBehind returns how many commits currentCommit is behind headCommit.
 // Used at restore time to show drift since checkpoint.
 // Returns -1 if the comparison cannot be made (different branches, no shared history).

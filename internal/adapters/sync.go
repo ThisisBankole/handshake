@@ -58,11 +58,12 @@ func SyncAll(database *db.Database, homeDir string) []SyncResult {
 // summaries, decisions, and git state recorded at checkpoint time survive
 // (StoreSession keeps them when the incoming values are empty).
 func SyncAgent(database *db.Database, homeDir, agent string) SyncResult {
+	knowledgeRoot := filepath.Join(homeDir, ".handshake", "knowledge")
 	switch agent {
 	case "claude-code":
 		a := NewClaudeCodeAdapter(homeDir)
 		stubs, err := a.ListSessions()
-		return syncSessions(database, agent, stubs, err,
+		return syncSessions(database, knowledgeRoot, agent, stubs, err,
 			func(id string) (*SessionData, error) { return a.ReadSession("", id) }, false)
 	case "codex":
 		a := NewCodexAdapter(homeDir)
@@ -70,15 +71,15 @@ func SyncAgent(database *db.Database, homeDir, agent string) SyncResult {
 		if err == nil {
 			a.buildPathIndex()
 		}
-		return syncSessions(database, agent, stubs, err, a.ReadSession, true)
+		return syncSessions(database, knowledgeRoot, agent, stubs, err, a.ReadSession, true)
 	case "opencode":
 		a := NewOpenCodeAdapter(homeDir)
 		stubs, err := a.ListSessions()
-		return syncSessions(database, agent, stubs, err, a.ReadSession, false)
+		return syncSessions(database, knowledgeRoot, agent, stubs, err, a.ReadSession, false)
 	case "hermes":
 		a := NewHermesAdapter(homeDir)
 		stubs, err := a.ListSessions()
-		return syncSessions(database, agent, stubs, err, a.ReadSession, false)
+		return syncSessions(database, knowledgeRoot, agent, stubs, err, a.ReadSession, false)
 	default:
 		return SyncResult{Agent: agent, Err: fmt.Errorf(
 			"unknown agent %q — pullable agents: %s", agent, strings.Join(PullableAgents, ", "))}
@@ -88,7 +89,7 @@ func SyncAgent(database *db.Database, homeDir, agent string) SyncResult {
 // syncSessions runs the shared pull loop over an agent's session stubs.
 // stubOnFail stores a metadata-only stub when a transcript cannot be read
 // (Codex keeps an index of sessions whose transcript files may be gone).
-func syncSessions(database *db.Database, agent string, stubs []*SessionData, listErr error,
+func syncSessions(database *db.Database, knowledgeRoot, agent string, stubs []*SessionData, listErr error,
 	read func(string) (*SessionData, error), stubOnFail bool) SyncResult {
 
 	res := SyncResult{Agent: agent}
@@ -128,7 +129,7 @@ func syncSessions(database *db.Database, agent string, stubs []*SessionData, lis
 			continue
 		}
 
-		if err := Ingest(database, full); err != nil {
+		if err := Ingest(database, knowledgeRoot, full); err != nil {
 			res.Failed++
 			continue
 		}

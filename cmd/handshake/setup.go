@@ -98,6 +98,10 @@ func setupCmd(homeDir, dbPath string) {
 	registerClaudeCodeHooks(homeDir)
 	registerHermesPlugin(homeDir)
 	registerCodexHooks(homeDir)
+	registerCursorHooks(homeDir)
+
+	fmt.Println()
+	authorSetupCmd(homeDir)
 
 	fmt.Println()
 	fmt.Println("  ✓ Step 1 complete.")
@@ -180,7 +184,7 @@ func setupCmd(homeDir, dbPath string) {
 	fmt.Println("  \"restore my <session_name> session\"")
 	fmt.Println()
 	fmt.Println("Your sessions are stored locally at ~/.handshake/sessions.db")
-	fmt.Println("No cloud. No accounts. No data leaving your machine.")
+	fmt.Println("Session checkpoints stay local. Any enabled background writer uses its selected agent CLI and provider account.")
 	fmt.Println()
 }
 
@@ -204,6 +208,10 @@ func uninstallCmd(homeDir string) {
 	deregisterClaudeCodeHooks(homeDir)
 	deregisterHermesPlugin(homeDir)
 	deregisterCodexHooks(homeDir)
+	deregisterCursorHooks(homeDir)
+	deregisterCursor(homeDir)
+	removeKnowledgeAuthoringSkills(homeDir)
+	removeHandshakeSkills(homeDir)
 	//deregisterCodexMCP(homeDir)
 	fmt.Println()
 
@@ -374,6 +382,9 @@ func registerAgentsIndented(homeDir string) {
 	registerClaudeCode(homeDir)
 	registerOpenCode(homeDir)
 	registerHermes(homeDir)
+	registerCursor(homeDir)
+	printKnowledgeSkillInstallResults(installKnowledgeAuthoringSkills(homeDir))
+	printKnowledgeSkillInstallResults(installHandshakeSkills(homeDir))
 }
 
 // confirmYN asks the user a yes/no question.

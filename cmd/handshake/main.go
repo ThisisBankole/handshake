@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"github.com/mattn/go-isatty"
 
 	"handshake/internal/adapters"
+	"handshake/internal/authoring"
 	"handshake/internal/db"
 	"handshake/internal/engine"
 	"handshake/internal/git"
@@ -19,6 +21,7 @@ import (
 	"handshake/internal/sessionmatch"
 	"handshake/internal/timeline"
 	"handshake/internal/tui"
+	"handshake/internal/update"
 	"handshake/plugins/opencode"
 )
 
@@ -65,6 +68,8 @@ func main() {
 			os.Exit(1)
 		}
 		handoffCmd(dbPath, os.Args[2])
+	case "knowledge":
+		knowledgeCmd(homeDir, dbPath, os.Args[2:])
 	case "timeline":
 		if len(os.Args) < 3 {
 			fmt.Println("Usage: handshake timeline <title>")
@@ -79,6 +84,7 @@ func main() {
 		uninstallCmd(homeDir)
 	case "version", "--version", "-v":
 		fmt.Println("handshake " + version)
+		printUpdateNotice(dbPath, version)
 	case "help", "--help", "-h":
 		usage()
 	default:
@@ -100,6 +106,7 @@ func usage() {
 	fmt.Println("  pull [agent]       Import sessions from agents' native storage")
 	fmt.Println("                     (agents: " + strings.Join(adapters.PullableAgents, ", ") + "; default all)")
 	fmt.Println("  handoff <id|title> Print a session's handoff packet and brief")
+	fmt.Println("  knowledge author  Configure the background AI knowledge writer")
 	fmt.Println("  timeline <title>   Print a session's activity timeline (prompts, tools, commits)")
 	fmt.Println("  install-service    Start the daemon on login (launchd/systemd)")
 	fmt.Println("  uninstall-service  Remove the login service")
@@ -146,6 +153,18 @@ func openDB(dbPath string) *db.Database {
 	return database
 }
 
+func printUpdateNotice(dbPath, installedVersion string) {
+	database, err := db.New(dbPath)
+	if err != nil {
+		return
+	}
+	defer database.Close()
+	status, err := database.GetUpdateStatus()
+	if err == nil && update.IsNewer(installedVersion, status.LatestVersion) {
+		fmt.Printf("Update available: %s (%s)\n", status.LatestVersion, status.ReleaseURL)
+	}
+}
+
 func initCmd(homeDir, dbPath string) {
 	database := openDB(dbPath)
 	database.Close()
@@ -165,6 +184,7 @@ func initCmd(homeDir, dbPath string) {
 	registerClaudeCodeHooks(homeDir)
 	registerHermesPlugin(homeDir)
 	registerCodexHooks(homeDir)
+	registerCursorHooks(homeDir)
 	fmt.Println("\nThen start the daemon with: handshake serve")
 }
 
@@ -178,6 +198,8 @@ func serveCmd(homeDir, dbPath string) {
 	defer database.Close()
 
 	srv := server.New("handshake", version, homeDir, database)
+	go authoring.NewWorker(database, homeDir, nil).WithMCPURL("http://" + addr + "/mcp").Start(context.Background())
+	update.Start(context.Background(), database, homeDir, version)
 	fmt.Printf("Handshake %s listening on http://%s\n", version, addr)
 	fmt.Printf("  MCP endpoint:    http://%s/mcp\n", addr)
 	fmt.Printf("  Ingest endpoint: http://%s/ingest\n", addr)

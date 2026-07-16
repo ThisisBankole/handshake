@@ -43,7 +43,8 @@ cd handshake
 go build -o handshake ./cmd/handshake
 ```
 
-After installing, run the setup wizard:
+When installed through curl in a terminal, the guided setup starts
+automatically. In a non-interactive environment, run it afterwards:
 ```bash
 handshake setup
 ```
@@ -51,6 +52,86 @@ handshake setup
 Takes about 30 seconds. Handshake registers with your agents, installs
 itself as a login service, and starts the daemon. After that it runs
 invisibly in the background.
+
+## Updates
+
+The daemon checks GitHub Releases in the background once a week and stores only
+the release result locally. It sends no project or session data. A newer release
+appears in the session browser, `handshake version`, and the
+`get_handshake_update_status` MCP tool.
+
+## Testing
+
+Run the regular suite from the repository root:
+
+```bash
+go test ./...
+```
+
+On Apple silicon Macs with the Apple Container CLI, run the same suite in a
+clean Linux environment:
+
+```bash
+# One-time machine setup
+container system start
+
+# Builds an isolated image and runs the tests without mounting your home directory.
+sh scripts/test-container.sh
+```
+
+The container test installs Go and Git, copies only the repository source into
+the image, and runs `go test ./...`. It does not mount your Handshake database
+or agent configuration, so it is suitable for migration and release checks.
+
+## Project Knowledge
+
+Each Git-aware checkpoint also writes a private, deterministic OKF-compatible
+bundle at `~/.handshake/knowledge/<project-id>/`. It contains checkpoint and
+Git timelines plus size-limited, per-file text diffs. Session transcripts are
+not exported. Sensitive and generated paths are omitted and recorded as such
+in each diff index.
+
+Agents can publish a `project-brief.md` and `repo-map.md` through the local
+`publish_project_knowledge` MCP tool. Each document declares the factual
+revision it used; Handshake rejects stale output and marks published documents
+stale after later checkpoints.
+
+Optionally enable a background writer to keep these two AI-authored documents
+current without asking the interactive agent to do the work:
+
+```bash
+handshake knowledge author setup
+handshake knowledge author show
+```
+
+Setup detects Claude Code, Codex, OpenCode, and Hermes, lets you choose one
+fallback writer, and asks for final approval because its model runs may consume
+quota. The daemon starts that CLI only after an active agent has had a short
+chance to publish both documents itself. Before starting the CLI, Handshake
+verifies that the documents are still stale for the latest factual revision. It
+never trusts terminal output as proof of success. Disable background model runs
+at any time with:
+
+```bash
+handshake knowledge author off
+```
+
+`handshake setup` and `handshake init` install Handshake's general and
+`knowledge-authoring` skills into the global skill location for Claude Code,
+Codex, OpenCode, and Hermes. Existing user-owned skills with the same name are
+left untouched. The general skill asks agents to report a cached available
+Handshake update before relevant work. Skill installation makes the workflow
+available to an agent;
+Claude Code also receives one Stop-hook continuation when a checkpoint leaves
+these documents stale, directing it to use the skill before the turn ends.
+OpenCode, Codex, and Hermes have the skill available as well. Background
+authoring uses the corresponding non-interactive CLI command, so it works even
+when that agent is not the one currently being used interactively.
+
+Cursor receives Handshake's MCP server and a managed Stop hook. The hook imports
+Cursor's local transcript after a completed turn. If project knowledge is stale,
+it sends Cursor one follow-up instruction to publish the two documents through
+MCP. Cursor is not yet available as an unattended background writer.
 
 ## Switching agents
 

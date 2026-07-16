@@ -1,0 +1,13 @@
+.git
+.handshake
+.agents
+.claude
+.codex
+.hermes
+.opencode
+docs
+dist
+handshake
+img
+**/__pycache__
+*.pyc

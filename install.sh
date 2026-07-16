@@ -78,16 +78,23 @@ rm -rf "$TMP"
 echo "✓ Handshake $VERSION installed to $INSTALL_DIR/$BINARY"
 echo ""
 
-# ── Non-interactive setup ──────────────────────────────────────────────────
-# Register with agents and install the login service without prompting.
-# The service starts the daemon automatically on login.
+# ── Setup ──────────────────────────────────────────────────────────────────
+# curl pipes the installer into sh, so setup reads and writes through /dev/tty
+# when a terminal is available. CI and other non-interactive environments keep
+# the previous unattended registration path.
 
 # Kill any stale handshake serve processes that might be holding the port
 pkill -f "handshake serve" 2>/dev/null || true
 
-echo "Running non-interactive setup..."
-"$INSTALL_DIR/$BINARY" init
-"$INSTALL_DIR/$BINARY" install-service
+if [ -t 1 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+  echo "Starting guided setup..."
+  "$INSTALL_DIR/$BINARY" setup </dev/tty >/dev/tty 2>&1
+else
+  echo "Running non-interactive setup..."
+  "$INSTALL_DIR/$BINARY" init
+  "$INSTALL_DIR/$BINARY" install-service
+  echo "Project knowledge is not configured. Run: handshake setup"
+fi
 echo ""
 
 # ── PATH check ─────────────────────────────────────────────────────────────
@@ -111,4 +118,4 @@ esac
 # ── Done ───────────────────────────────────────────────────────────────────
 
 echo "✓ Handshake is ready."
-echo "Your sessions are stored locally — no cloud, no accounts."
+echo "Session checkpoints stay local. Optional project knowledge uses the writer you choose."

@@ -2,11 +2,15 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 
 	"handshake/internal/adapters"
+	"handshake/internal/db"
 	"handshake/internal/git"
+	"handshake/internal/knowledge"
 )
 
 // ingestPayload is the JSON body POSTed to /ingest, primarily by the bundled
@@ -36,6 +40,17 @@ type ingestPayload struct {
 // to regenerate and cache the brief for a session without a full checkpoint.
 type generateBriefPayload struct {
 	SessionID string `json:"session_id"`
+}
+
+type knowledgeAuthoringCheckPayload struct {
+	WorkingDir string `json:"working_dir"`
+}
+
+type knowledgeAuthoringCheckResponse struct {
+	Pending       bool   `json:"pending"`
+	ProjectID     string `json:"project_id,omitempty"`
+	FactsRevision int64  `json:"facts_revision,omitempty"`
+	Status        string `json:"status,omitempty"`
 }
 
 func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
@@ -79,13 +94,50 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 
 	s.enrichIngestedSession(session)
 
-	if err := adapters.Ingest(s.db, session); err != nil {
+	if err := adapters.Ingest(s.db, filepath.Join(s.homeDir, ".handshake", "knowledge"), session); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"ok":true,"session_id":%q,"messages":%d}`+"\n", session.ID, len(session.Messages))
+}
+
+// handleKnowledgeAuthoringCheck is intentionally small enough for lifecycle
+// hooks. It reports only whether the current project needs its AI-authored OKF
+// documents refreshed; the agent skill reads the actual factual documents.
+func (s *Server) handleKnowledgeAuthoringCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var payload knowledgeAuthoringCheckPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	context, err := knowledge.GetProjectContext(s.db, payload.WorkingDir)
+	if errors.Is(err, db.ErrKnowledgeStateNotFound) {
+		writeKnowledgeAuthoringCheck(w, knowledgeAuthoringCheckResponse{})
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeKnowledgeAuthoringCheck(w, knowledgeAuthoringCheckResponse{
+		Pending:       context.State.Status != db.KnowledgeCurrent,
+		ProjectID:     context.ProjectID,
+		FactsRevision: context.State.FactsRevision,
+		Status:        context.State.Status,
+	})
+}
+
+func writeKnowledgeAuthoringCheck(w http.ResponseWriter, response knowledgeAuthoringCheckResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		return
+	}
 }
 
 func (s *Server) enrichIngestedSession(session *adapters.SessionData) {

@@ -63,6 +63,12 @@ func TestSyncAgentClaudeCode(t *testing.T) {
 	if session.Agent != "claude-code" || session.Title != "fix the port bug" {
 		t.Fatalf("unexpected session: %+v", session)
 	}
+	if session.ProjectID == "" {
+		t.Fatalf("sync did not assign project identity: %+v", session)
+	}
+	if _, err := os.Stat(filepath.Join(homeDir, ".handshake", "knowledge", session.ProjectID, "index.md")); err != nil {
+		t.Fatalf("sync did not write knowledge bundle: %v", err)
+	}
 
 	// A second pull with nothing new is a no-op, even though the file's
 	// mtime is later than the last message timestamp.
