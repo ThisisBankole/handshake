@@ -115,8 +115,10 @@ func TestRecordCheckpoint_PreservesCheckpointSummaryInSnapshot(t *testing.T) {
 	if _, err := RecordCheckpoint(database, first); err != nil {
 		t.Fatalf("first checkpoint: %v", err)
 	}
+	// The retitled sync omits summary and decisions; hydration must carry
+	// them into the new snapshot.
 	second := &db.Session{
-		ID: "session-1", Agent: "claude-code", Title: "Preserve summary",
+		ID: "session-1", Agent: "claude-code", Title: "Preserve summary (retitled)",
 		WorkingDir: dir, UpdatedAt: 200,
 	}
 	if _, err := RecordCheckpoint(database, second); err != nil {
@@ -132,6 +134,59 @@ func TestRecordCheckpoint_PreservesCheckpointSummaryInSnapshot(t *testing.T) {
 	}
 	if snapshots[1].Summary != "Producer summary" || snapshots[1].Decisions != "Use SQLite" {
 		t.Fatalf("latest snapshot lost source metadata: %+v", snapshots[1])
+	}
+}
+
+func TestRecordCheckpoint_TimestampOnlyCheckpointDoesNotBumpFacts(t *testing.T) {
+	dir := t.TempDir()
+	database, err := db.New(filepath.Join(t.TempDir(), "sessions.db"))
+	if err != nil {
+		t.Fatalf("db.New: %v", err)
+	}
+	defer database.Close()
+
+	first := &db.Session{
+		ID: "session-1", Agent: "claude-code", Title: "Conversation only",
+		WorkingDir: dir, Summary: "Producer summary", UpdatedAt: 100,
+	}
+	initial, err := RecordCheckpoint(database, first)
+	if err != nil {
+		t.Fatalf("first checkpoint: %v", err)
+	}
+
+	// A conversation-only turn: nothing changed except time. This must not
+	// create a snapshot or bump facts_revision, or AI documents go stale on
+	// every agent response.
+	repeat := &db.Session{
+		ID: "session-1", Agent: "claude-code", Title: "Conversation only",
+		WorkingDir: dir, Summary: "Producer summary", UpdatedAt: 200,
+	}
+	state, err := RecordCheckpoint(database, repeat)
+	if err != nil {
+		t.Fatalf("repeat checkpoint: %v", err)
+	}
+	if state.FactsRevision != initial.FactsRevision {
+		t.Fatalf("timestamp-only checkpoint bumped facts_revision: %d -> %d", initial.FactsRevision, state.FactsRevision)
+	}
+	snapshots, err := database.ListGitSnapshots(repeat.ProjectID, 0)
+	if err != nil {
+		t.Fatalf("ListGitSnapshots: %v", err)
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("snapshot count = %d, want 1", len(snapshots))
+	}
+
+	// A real change (new summary) still advances the facts.
+	material := &db.Session{
+		ID: "session-1", Agent: "claude-code", Title: "Conversation only",
+		WorkingDir: dir, Summary: "Implemented the parser", UpdatedAt: 300,
+	}
+	state, err = RecordCheckpoint(database, material)
+	if err != nil {
+		t.Fatalf("material checkpoint: %v", err)
+	}
+	if state.FactsRevision != initial.FactsRevision+1 {
+		t.Fatalf("material checkpoint did not bump facts_revision: %+v", state)
 	}
 }
 

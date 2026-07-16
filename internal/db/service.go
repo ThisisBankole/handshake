@@ -104,7 +104,12 @@ type KnowledgeState struct {
 	AIRevision     int64
 	Status         string
 	LastSnapshotID int64
-	UpdatedAt      int64
+	// AgentRequestedAt is when a live agent was last handed a refresh
+	// instruction. The authoring check treats it as a cooldown so lifecycle
+	// hooks do not interrupt the agent every turn; background authoring is
+	// not throttled by it.
+	AgentRequestedAt int64
+	UpdatedAt        int64
 }
 
 // KnowledgeDocument records provenance for a future OKF document. The
@@ -240,12 +245,13 @@ func (d *Database) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_git_snapshots_session ON git_snapshots(session_id, id DESC);
 
 	CREATE TABLE IF NOT EXISTS knowledge_state (
-		project_id       TEXT PRIMARY KEY,
-		facts_revision   INTEGER NOT NULL DEFAULT 0,
-		ai_revision      INTEGER NOT NULL DEFAULT 0,
-		status           TEXT NOT NULL,
-		last_snapshot_id INTEGER NOT NULL DEFAULT 0,
-		updated_at       INTEGER NOT NULL,
+		project_id         TEXT PRIMARY KEY,
+		facts_revision     INTEGER NOT NULL DEFAULT 0,
+		ai_revision        INTEGER NOT NULL DEFAULT 0,
+		status             TEXT NOT NULL,
+		last_snapshot_id   INTEGER NOT NULL DEFAULT 0,
+		agent_requested_at INTEGER NOT NULL DEFAULT 0,
+		updated_at         INTEGER NOT NULL,
 		FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 	);
 
@@ -326,6 +332,12 @@ func (d *Database) initSchema() error {
 	if _, err := d.db.Exec("ALTER TABLE sessions ADD COLUMN decisions TEXT NOT NULL DEFAULT ''"); err != nil &&
 		!strings.Contains(err.Error(), "duplicate column name") {
 		return fmt.Errorf("failed to migrate sessions decisions: %w", err)
+	}
+
+	// Migration for databases created before the agent-request cooldown existed.
+	if _, err := d.db.Exec("ALTER TABLE knowledge_state ADD COLUMN agent_requested_at INTEGER NOT NULL DEFAULT 0"); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("failed to migrate knowledge_state agent_requested_at: %w", err)
 	}
 
 	// Existing databases gain an initially empty project link. Historical sessions are
