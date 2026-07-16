@@ -180,6 +180,9 @@ func decodeOrCaptureGitState(session *db.Session) (*git.State, error) {
 }
 
 func checkpointFingerprint(session *db.Session, identity *Identity, snapshot *db.GitSnapshot) string {
+	// session.UpdatedAt is deliberately excluded: a checkpoint where only time
+	// passed must dedupe against the previous snapshot, or conversation-only
+	// turns bump facts_revision and re-stale the AI documents every turn.
 	parts := []string{
 		session.ID,
 		session.Agent,
@@ -188,7 +191,6 @@ func checkpointFingerprint(session *db.Session, identity *Identity, snapshot *db
 		session.Title,
 		session.Summary,
 		session.Decisions,
-		fmt.Sprintf("%d", session.UpdatedAt),
 		snapshot.Commit,
 		snapshot.Branch,
 		snapshot.Message,

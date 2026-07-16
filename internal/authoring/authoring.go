@@ -30,6 +30,7 @@ const (
 	defaultActiveAgentGrace = 60 * time.Second
 	defaultTimeout          = 2 * time.Minute
 	defaultRetries          = 3
+	defaultAgentCooldown    = time.Hour
 )
 
 var ErrDisabled = errors.New("knowledge authoring is disabled")
@@ -42,10 +43,19 @@ type Config struct {
 	DebounceSeconds int    `json:"debounce_seconds"`
 	TimeoutSeconds  int    `json:"timeout_seconds"`
 	RetryLimit      int    `json:"retry_limit"`
+	// AgentCooldownSeconds limits how often lifecycle hooks may interrupt a
+	// live agent with a refresh instruction. 0 disables agent interruptions
+	// entirely, leaving refreshes to background authoring.
+	AgentCooldownSeconds int `json:"agent_cooldown_seconds"`
 }
 
 func DefaultConfig() Config {
-	return Config{DebounceSeconds: int(defaultActiveAgentGrace.Seconds()), TimeoutSeconds: int(defaultTimeout.Seconds()), RetryLimit: defaultRetries}
+	return Config{
+		DebounceSeconds:      int(defaultActiveAgentGrace.Seconds()),
+		TimeoutSeconds:       int(defaultTimeout.Seconds()),
+		RetryLimit:           defaultRetries,
+		AgentCooldownSeconds: int(defaultAgentCooldown.Seconds()),
+	}
 }
 
 func ConfigPath(homeDir string) string {
@@ -97,6 +107,9 @@ func (c Config) Validate() error {
 	}
 	if c.RetryLimit < 0 || c.RetryLimit > 20 {
 		return fmt.Errorf("authoring retry limit must be between 0 and 20")
+	}
+	if c.AgentCooldownSeconds < 0 || c.AgentCooldownSeconds > 86400 {
+		return fmt.Errorf("authoring agent cooldown must be between 0 and 86400 seconds")
 	}
 	return nil
 }

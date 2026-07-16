@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"time"
 
 	"handshake/internal/adapters"
+	"handshake/internal/authoring"
 	"handshake/internal/db"
 	"handshake/internal/git"
 	"handshake/internal/knowledge"
@@ -125,12 +127,43 @@ func (s *Server) handleKnowledgeAuthoringCheck(w http.ResponseWriter, r *http.Re
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	pending := context.State.Status != db.KnowledgeCurrent
+	if pending && !s.agentRefreshAllowed(context.State) {
+		// Stale, but the agent was asked recently. Report not-pending so the
+		// hook stays silent; the background authoring job still covers it.
+		pending = false
+	}
+	if pending {
+		if err := s.db.MarkKnowledgeAgentRequested(context.ProjectID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
 	writeKnowledgeAuthoringCheck(w, knowledgeAuthoringCheckResponse{
-		Pending:       context.State.Status != db.KnowledgeCurrent,
+		Pending:       pending,
 		ProjectID:     context.ProjectID,
 		FactsRevision: context.State.FactsRevision,
 		Status:        context.State.Status,
 	})
+}
+
+// agentRefreshAllowed decides whether a live agent may be interrupted with a
+// refresh instruction. First-ever authoring always may: no documents exist
+// yet, so silence would leave the project without knowledge. After that, one
+// interruption per cooldown window.
+func (s *Server) agentRefreshAllowed(state *db.KnowledgeState) bool {
+	if state.AIRevision == 0 {
+		return true
+	}
+	config, err := authoring.LoadConfig(s.homeDir)
+	if err != nil {
+		config = authoring.DefaultConfig()
+	}
+	if config.AgentCooldownSeconds == 0 {
+		return false
+	}
+	cooldown := time.Duration(config.AgentCooldownSeconds) * time.Second
+	return time.Since(time.Unix(state.AgentRequestedAt, 0)) >= cooldown
 }
 
 func writeKnowledgeAuthoringCheck(w http.ResponseWriter, response knowledgeAuthoringCheckResponse) {

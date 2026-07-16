@@ -95,6 +95,50 @@ func TestRecordKnowledgeCheckpoint_TracksRevisionAndFreshness(t *testing.T) {
 	}
 }
 
+func TestMarkKnowledgeAgentRequested_StartsCooldown(t *testing.T) {
+	database, err := New(filepath.Join(t.TempDir(), "knowledge.db"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	if _, err := database.RecordKnowledgeCheckpoint(newKnowledgeCheckpoint("snapshot-a")); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	state, err := database.GetKnowledgeState("project-1")
+	if err != nil {
+		t.Fatalf("GetKnowledgeState: %v", err)
+	}
+	if state.AgentRequestedAt != 0 {
+		t.Fatalf("new project already has agent request timestamp: %+v", state)
+	}
+
+	if err := database.MarkKnowledgeAgentRequested("project-1"); err != nil {
+		t.Fatalf("MarkKnowledgeAgentRequested: %v", err)
+	}
+	state, err = database.GetKnowledgeState("project-1")
+	if err != nil {
+		t.Fatalf("GetKnowledgeState after mark: %v", err)
+	}
+	if state.AgentRequestedAt == 0 {
+		t.Fatalf("agent request timestamp was not recorded: %+v", state)
+	}
+
+	// A later checkpoint must not reset the cooldown.
+	next := newKnowledgeCheckpoint("snapshot-b")
+	next.Snapshot.Commit = "def456"
+	if _, err := database.RecordKnowledgeCheckpoint(next); err != nil {
+		t.Fatalf("second checkpoint: %v", err)
+	}
+	after, err := database.GetKnowledgeState("project-1")
+	if err != nil {
+		t.Fatalf("GetKnowledgeState after checkpoint: %v", err)
+	}
+	if after.AgentRequestedAt != state.AgentRequestedAt {
+		t.Fatalf("checkpoint reset agent request timestamp: %+v", after)
+	}
+}
+
 func TestGetKnowledgeState_NotFound(t *testing.T) {
 	database, err := New(filepath.Join(t.TempDir(), "knowledge.db"))
 	if err != nil {

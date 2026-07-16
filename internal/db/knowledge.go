@@ -316,15 +316,26 @@ func (d *Database) MarkKnowledgeCurrent(projectID string) (*KnowledgeState, erro
 	return state, nil
 }
 
+// MarkKnowledgeAgentRequested records that a live agent was just handed a
+// refresh instruction, starting the cooldown that keeps lifecycle hooks from
+// interrupting the agent again until it expires.
+func (d *Database) MarkKnowledgeAgentRequested(projectID string) error {
+	if _, err := d.db.Exec(`UPDATE knowledge_state SET agent_requested_at = ? WHERE project_id = ?`,
+		time.Now().Unix(), projectID); err != nil {
+		return fmt.Errorf("mark knowledge agent requested: %w", err)
+	}
+	return nil
+}
+
 type sqlQueryer interface {
 	QueryRow(query string, args ...any) *sql.Row
 }
 
 func getKnowledgeState(queryer sqlQueryer, projectID string) (*KnowledgeState, error) {
 	state := &KnowledgeState{}
-	err := queryer.QueryRow(`SELECT project_id, facts_revision, ai_revision, status, last_snapshot_id, updated_at
+	err := queryer.QueryRow(`SELECT project_id, facts_revision, ai_revision, status, last_snapshot_id, agent_requested_at, updated_at
 		FROM knowledge_state WHERE project_id = ?`, projectID).Scan(
-		&state.ProjectID, &state.FactsRevision, &state.AIRevision, &state.Status, &state.LastSnapshotID, &state.UpdatedAt)
+		&state.ProjectID, &state.FactsRevision, &state.AIRevision, &state.Status, &state.LastSnapshotID, &state.AgentRequestedAt, &state.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrKnowledgeStateNotFound
 	}
