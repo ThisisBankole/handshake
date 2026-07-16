@@ -6,10 +6,12 @@ import (
 	"path/filepath"
 	"strings"
 
+	handshakeskill "handshake/skills/handshake"
 	knowledgeauthoring "handshake/skills/knowledge-authoring"
 )
 
 const knowledgeSkillName = "knowledge-authoring"
+const handshakeSkillName = "handshake"
 
 type knowledgeSkillTarget struct {
 	agent string
@@ -39,9 +41,26 @@ func knowledgeSkillTargets(homeDir string) []knowledgeSkillTarget {
 	}
 }
 
+func handshakeSkillTargets(homeDir string) []knowledgeSkillTarget {
+	return []knowledgeSkillTarget{
+		{agent: "Claude Code", path: filepath.Join(homeDir, ".claude", "skills", handshakeSkillName, "SKILL.md")},
+		{agent: "Codex", path: filepath.Join(homeDir, ".codex", "skills", handshakeSkillName, "SKILL.md")},
+		{agent: "OpenCode", path: filepath.Join(homeDir, ".config", "opencode", "skills", handshakeSkillName, "SKILL.md")},
+		{agent: "Hermes", path: filepath.Join(homeDir, ".hermes", "skills", handshakeSkillName, "SKILL.md")},
+	}
+}
+
 func installKnowledgeAuthoringSkills(homeDir string) []knowledgeSkillInstallResult {
-	results := make([]knowledgeSkillInstallResult, 0, len(knowledgeSkillTargets(homeDir)))
-	for _, target := range knowledgeSkillTargets(homeDir) {
+	return installManagedSkills(knowledgeSkillTargets(homeDir), knowledgeauthoring.Definition)
+}
+
+func installHandshakeSkills(homeDir string) []knowledgeSkillInstallResult {
+	return installManagedSkills(handshakeSkillTargets(homeDir), handshakeskill.Definition)
+}
+
+func installManagedSkills(targets []knowledgeSkillTarget, definition []byte) []knowledgeSkillInstallResult {
+	results := make([]knowledgeSkillInstallResult, 0, len(targets))
+	for _, target := range targets {
 		result := knowledgeSkillInstallResult{target: target}
 		existing, err := os.ReadFile(target.path)
 		exists := err == nil
@@ -50,10 +69,10 @@ func installKnowledgeAuthoringSkills(homeDir string) []knowledgeSkillInstallResu
 			result.status = knowledgeSkillUserOwned
 		case err != nil && !os.IsNotExist(err):
 			result.err = err
-		case err == nil && string(existing) == string(knowledgeauthoring.Definition):
+		case err == nil && string(existing) == string(definition):
 			result.status = knowledgeSkillUpdated
 		default:
-			if err := writeFileAtomic(target.path, knowledgeauthoring.Definition, 0644); err != nil {
+			if err := writeFileAtomic(target.path, definition, 0644); err != nil {
 				result.err = err
 			} else if exists {
 				result.status = knowledgeSkillUpdated
@@ -82,7 +101,15 @@ func printKnowledgeSkillInstallResults(results []knowledgeSkillInstallResult) {
 }
 
 func removeKnowledgeAuthoringSkills(homeDir string) {
-	for _, target := range knowledgeSkillTargets(homeDir) {
+	removeManagedSkills(knowledgeSkillTargets(homeDir))
+}
+
+func removeHandshakeSkills(homeDir string) {
+	removeManagedSkills(handshakeSkillTargets(homeDir))
+}
+
+func removeManagedSkills(targets []knowledgeSkillTarget) {
+	for _, target := range targets {
 		contents, err := os.ReadFile(target.path)
 		if os.IsNotExist(err) {
 			continue

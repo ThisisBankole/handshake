@@ -19,6 +19,7 @@ import (
 	"handshake/internal/git"
 	"handshake/internal/knowledge"
 	"handshake/internal/sessionmatch"
+	"handshake/internal/update"
 )
 
 // Server bundles the canonical database, the MCP tool surface, and the plain
@@ -28,6 +29,7 @@ type Server struct {
 	mcp     *mcpserver.MCPServer
 	engine  *engine.BriefGenerator
 	homeDir string
+	version string
 }
 
 func New(name, version, homeDir string, database *db.Database) *Server {
@@ -36,6 +38,7 @@ func New(name, version, homeDir string, database *db.Database) *Server {
 		mcp:     mcpserver.NewMCPServer(name, version),
 		engine:  engine.NewBriefGenerator(database),
 		homeDir: homeDir,
+		version: version,
 	}
 	s.addTools()
 	return s
@@ -86,6 +89,15 @@ func (s *Server) addTools() {
 	)
 
 	s.mcp.AddTool(
+		mcp.NewTool("get_handshake_update_status",
+			mcp.WithDescription("Get Handshake's cached update status. This never contacts the network. If an update is available, tell the user briefly before continuing Handshake-related work."),
+		),
+		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return s.handleUpdateStatus(request)
+		},
+	)
+
+	s.mcp.AddTool(
 		mcp.NewTool("get_project_knowledge_context",
 			mcp.WithDescription("Get the project ID, current factual revision, and AI-document freshness for a working directory. Call this before authoring project knowledge."),
 			mcp.WithString("working_dir", mcp.Description("Repository or project working directory"), mcp.Required()),
@@ -116,7 +128,7 @@ func (s *Server) addTools() {
 			mcp.WithDescription("List recent checkpointed sessions with IDs, titles, and relative timestamps"),
 			mcp.WithString("agent",
 				mcp.Description("Filter by agent type (optional)"),
-				mcp.Enum("claude-code", "opencode", "hermes"),
+				mcp.Enum("claude-code", "opencode", "hermes", "codex", "cursor"),
 			),
 		),
 		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -185,13 +197,36 @@ func (s *Server) addTools() {
 			),
 			mcp.WithString("agent",
 				mcp.Description("Filter results to a specific agent (optional)"),
-				mcp.Enum("claude-code", "opencode", "hermes", "codex"),
+				mcp.Enum("claude-code", "opencode", "hermes", "codex", "cursor"),
 			),
 		),
 		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			return s.handleSearchAllSessions(request)
 		},
 	)
+}
+
+func (s *Server) handleUpdateStatus(_ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	status, err := s.db.GetUpdateStatus()
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if status.LastCheckedAt == 0 {
+		return mcp.NewToolResultText("Handshake update status has not been checked yet. The daemon checks in the background; no network request is made by this tool."), nil
+	}
+	var text strings.Builder
+	fmt.Fprintf(&text, "Installed: %s\nChecked: %s\n", s.version, time.Unix(status.LastCheckedAt, 0).Format(time.RFC3339))
+	if status.LastError != "" {
+		fmt.Fprintf(&text, "Last check error: %s\n", status.LastError)
+		return mcp.NewToolResultText(text.String()), nil
+	}
+	fmt.Fprintf(&text, "Latest release: %s\n", status.LatestVersion)
+	if update.IsNewer(s.version, status.LatestVersion) {
+		fmt.Fprintf(&text, "Update available: yes\nRelease: %s\nTell the user a newer Handshake release is available.", status.ReleaseURL)
+	} else {
+		text.WriteString("Update available: no")
+	}
+	return mcp.NewToolResultText(text.String()), nil
 }
 
 func (s *Server) handleGetProjectKnowledgeContext(request mcp.CallToolRequest) (*mcp.CallToolResult, error) {

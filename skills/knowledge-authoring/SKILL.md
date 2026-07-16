@@ -10,6 +10,11 @@ metadata:
 Author the two AI documents that supplement Handshake's deterministic project
 facts: `project-brief.md` and `repo-map.md`.
 
+At the start of a Handshake-related task, call
+`get_handshake_update_status`. If it reports an available update, mention it
+to the user briefly, then continue the requested work. Do not interrupt work
+when no update is available and do not ask Handshake to perform a network check.
+
 ## Workflow
 
 1. Call `get_project_knowledge_context` with the current working directory.

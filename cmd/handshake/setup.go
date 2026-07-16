@@ -98,6 +98,7 @@ func setupCmd(homeDir, dbPath string) {
 	registerClaudeCodeHooks(homeDir)
 	registerHermesPlugin(homeDir)
 	registerCodexHooks(homeDir)
+	registerCursorHooks(homeDir)
 
 	fmt.Println()
 	authorSetupCmd(homeDir)
@@ -207,7 +208,10 @@ func uninstallCmd(homeDir string) {
 	deregisterClaudeCodeHooks(homeDir)
 	deregisterHermesPlugin(homeDir)
 	deregisterCodexHooks(homeDir)
+	deregisterCursorHooks(homeDir)
+	deregisterCursor(homeDir)
 	removeKnowledgeAuthoringSkills(homeDir)
+	removeHandshakeSkills(homeDir)
 	//deregisterCodexMCP(homeDir)
 	fmt.Println()
 
@@ -378,7 +382,9 @@ func registerAgentsIndented(homeDir string) {
 	registerClaudeCode()
 	registerOpenCode(homeDir)
 	registerHermes(homeDir)
+	registerCursor(homeDir)
 	printKnowledgeSkillInstallResults(installKnowledgeAuthoringSkills(homeDir))
+	printKnowledgeSkillInstallResults(installHandshakeSkills(homeDir))
 }
 
 // confirmYN asks the user a yes/no question.

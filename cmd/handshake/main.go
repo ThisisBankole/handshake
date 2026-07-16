@@ -21,6 +21,7 @@ import (
 	"handshake/internal/sessionmatch"
 	"handshake/internal/timeline"
 	"handshake/internal/tui"
+	"handshake/internal/update"
 	"handshake/plugins/opencode"
 )
 
@@ -83,6 +84,7 @@ func main() {
 		uninstallCmd(homeDir)
 	case "version", "--version", "-v":
 		fmt.Println("handshake " + version)
+		printUpdateNotice(dbPath, version)
 	case "help", "--help", "-h":
 		usage()
 	default:
@@ -151,6 +153,18 @@ func openDB(dbPath string) *db.Database {
 	return database
 }
 
+func printUpdateNotice(dbPath, installedVersion string) {
+	database, err := db.New(dbPath)
+	if err != nil {
+		return
+	}
+	defer database.Close()
+	status, err := database.GetUpdateStatus()
+	if err == nil && update.IsNewer(installedVersion, status.LatestVersion) {
+		fmt.Printf("Update available: %s (%s)\n", status.LatestVersion, status.ReleaseURL)
+	}
+}
+
 func initCmd(homeDir, dbPath string) {
 	database := openDB(dbPath)
 	database.Close()
@@ -170,6 +184,7 @@ func initCmd(homeDir, dbPath string) {
 	registerClaudeCodeHooks(homeDir)
 	registerHermesPlugin(homeDir)
 	registerCodexHooks(homeDir)
+	registerCursorHooks(homeDir)
 	fmt.Println("\nThen start the daemon with: handshake serve")
 }
 
@@ -184,6 +199,7 @@ func serveCmd(homeDir, dbPath string) {
 
 	srv := server.New("handshake", version, homeDir, database)
 	go authoring.NewWorker(database, homeDir, nil).WithMCPURL("http://" + addr + "/mcp").Start(context.Background())
+	update.Start(context.Background(), database, homeDir, version)
 	fmt.Printf("Handshake %s listening on http://%s\n", version, addr)
 	fmt.Printf("  MCP endpoint:    http://%s/mcp\n", addr)
 	fmt.Printf("  Ingest endpoint: http://%s/ingest\n", addr)

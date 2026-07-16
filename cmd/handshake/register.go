@@ -12,6 +12,7 @@ import (
 
 	claudecode "handshake/plugins/claudecode"
 	codexplugin "handshake/plugins/codex"
+	cursorplugin "handshake/plugins/cursor"
 	hermesplugin "handshake/plugins/hermes"
 )
 
@@ -20,7 +21,9 @@ func registerAgents(homeDir string) {
 	registerOpenCode(homeDir)
 	registerHermes(homeDir)
 	registerCodexMCP(homeDir)
+	registerCursor(homeDir)
 	printKnowledgeSkillInstallResults(installKnowledgeAuthoringSkills(homeDir))
+	printKnowledgeSkillInstallResults(installHandshakeSkills(homeDir))
 }
 
 func deregisterAgents(homeDir string, deleteDB bool) {
@@ -33,7 +36,10 @@ func deregisterAgents(homeDir string, deleteDB bool) {
 	deregisterHermesPlugin(homeDir)
 	deregisterCodexHooks(homeDir)
 	deregisterCodexMCP(homeDir)
+	deregisterCursorHooks(homeDir)
+	deregisterCursor(homeDir)
 	removeKnowledgeAuthoringSkills(homeDir)
+	removeHandshakeSkills(homeDir)
 
 	dbPath := filepath.Join(homeDir, ".handshake", "sessions.db")
 	if deleteDB {
@@ -904,6 +910,217 @@ func promptYesNo(question string) bool {
 		return answer == "y" || answer == "yes"
 	}
 	return false
+}
+
+// --- Cursor MCP registration + Stop hook ---
+
+func cursorDetected(homeDir string) bool {
+	if _, err := exec.LookPath("cursor-agent"); err == nil {
+		return true
+	}
+	info, err := os.Stat(filepath.Join(homeDir, ".cursor"))
+	return err == nil && info.IsDir()
+}
+
+func registerCursor(homeDir string) {
+	if !cursorDetected(homeDir) {
+		fmt.Println("- Cursor: not detected, skipping")
+		return
+	}
+	configPath := filepath.Join(homeDir, ".cursor", "mcp.json")
+	config, exists, err := readCursorConfig(configPath)
+	if err != nil {
+		fmt.Printf("- Cursor: could not read mcp.json: %v\n", err)
+		return
+	}
+	cursorInjectMCP(config, mcpURL())
+	if exists {
+		if err := backup(configPath); err != nil {
+			fmt.Printf("- Cursor: could not back up mcp.json: %v\n", err)
+			return
+		}
+	}
+	if err := writeJSON(configPath, config); err != nil {
+		fmt.Printf("- Cursor: could not write mcp.json: %v\n", err)
+		return
+	}
+	fmt.Println("✓ Cursor: registered")
+}
+
+func deregisterCursor(homeDir string) {
+	configPath := filepath.Join(homeDir, ".cursor", "mcp.json")
+	config, exists, err := readCursorConfig(configPath)
+	if os.IsNotExist(err) || !exists {
+		fmt.Println("✓ Cursor: no MCP config found, nothing to remove")
+		return
+	}
+	if err != nil {
+		fmt.Printf("- Cursor: could not read mcp.json: %v\n", err)
+		return
+	}
+	if !cursorRemoveMCP(config) {
+		fmt.Println("✓ Cursor: Handshake not registered, nothing to remove")
+		return
+	}
+	if err := backup(configPath); err != nil {
+		fmt.Printf("- Cursor: could not back up mcp.json: %v\n", err)
+		return
+	}
+	if err := writeJSON(configPath, config); err != nil {
+		fmt.Printf("- Cursor: could not write mcp.json: %v\n", err)
+		return
+	}
+	fmt.Println("✓ Cursor: removed")
+}
+
+func readCursorConfig(path string) (map[string]any, bool, error) {
+	contents, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return map[string]any{}, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	var config map[string]any
+	if err := json.Unmarshal(contents, &config); err != nil {
+		return nil, true, fmt.Errorf("invalid JSON: %w", err)
+	}
+	return config, true, nil
+}
+
+func cursorInjectMCP(config map[string]any, url string) {
+	servers, _ := config["mcpServers"].(map[string]any)
+	if servers == nil {
+		servers = map[string]any{}
+	}
+	servers["handshake"] = map[string]any{"url": url}
+	config["mcpServers"] = servers
+}
+
+func cursorRemoveMCP(config map[string]any) bool {
+	servers, _ := config["mcpServers"].(map[string]any)
+	if servers == nil {
+		return false
+	}
+	if _, exists := servers["handshake"]; !exists {
+		return false
+	}
+	delete(servers, "handshake")
+	if len(servers) == 0 {
+		delete(config, "mcpServers")
+	}
+	return true
+}
+
+func registerCursorHooks(homeDir string) {
+	if !cursorDetected(homeDir) {
+		return
+	}
+	python := resolvePython()
+	if python == "" {
+		fmt.Println("- Cursor hooks: Python 3 not found, skipping")
+		return
+	}
+	hooksDir := filepath.Join(homeDir, ".cursor", "hooks")
+	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+		fmt.Printf("- Cursor hooks: could not create hooks directory: %v\n", err)
+		return
+	}
+	stopPath := filepath.Join(hooksDir, "handshake_cursor_stop.py")
+	if err := os.WriteFile(stopPath, injectBaseURL(cursorplugin.StopHook, baseURL()), 0755); err != nil {
+		fmt.Printf("- Cursor hooks: could not write stop hook: %v\n", err)
+		return
+	}
+
+	configPath := filepath.Join(homeDir, ".cursor", "hooks.json")
+	config, exists, err := readCursorConfig(configPath)
+	if err != nil {
+		fmt.Printf("- Cursor hooks: could not read hooks.json: %v\n", err)
+		return
+	}
+	if !cursorInjectStopHook(config, fmt.Sprintf("%s %s", python, stopPath)) {
+		fmt.Println("✓ Cursor hooks: already registered")
+		return
+	}
+	if exists {
+		if err := backup(configPath); err != nil {
+			fmt.Printf("- Cursor hooks: could not back up hooks.json: %v\n", err)
+			return
+		}
+	}
+	if err := writeJSON(configPath, config); err != nil {
+		fmt.Printf("- Cursor hooks: could not write hooks.json: %v\n", err)
+		return
+	}
+	fmt.Println("✓ Cursor hooks: registered (Stop)")
+}
+
+func cursorInjectStopHook(config map[string]any, command string) bool {
+	hooks, _ := config["hooks"].(map[string]any)
+	if hooks == nil {
+		hooks = map[string]any{}
+	}
+	stops, _ := hooks["stop"].([]any)
+	for _, stop := range stops {
+		entry, _ := stop.(map[string]any)
+		if existing, _ := entry["command"].(string); strings.Contains(existing, "handshake_cursor_stop.py") {
+			return false
+		}
+	}
+	hooks["stop"] = append(stops, map[string]any{"command": command, "timeout": 30})
+	config["hooks"] = hooks
+	return true
+}
+
+func deregisterCursorHooks(homeDir string) {
+	configPath := filepath.Join(homeDir, ".cursor", "hooks.json")
+	config, exists, err := readCursorConfig(configPath)
+	if err != nil || !exists {
+		return
+	}
+	if cursorRemoveStopHook(config) {
+		if err := backup(configPath); err != nil {
+			fmt.Printf("- Cursor hooks: could not back up hooks.json: %v\n", err)
+			return
+		}
+		if err := writeJSON(configPath, config); err != nil {
+			fmt.Printf("- Cursor hooks: could not write hooks.json: %v\n", err)
+			return
+		}
+		fmt.Println("✓ Cursor hooks: removed")
+	}
+	_ = os.Remove(filepath.Join(homeDir, ".cursor", "hooks", "handshake_cursor_stop.py"))
+}
+
+func cursorRemoveStopHook(config map[string]any) bool {
+	hooks, _ := config["hooks"].(map[string]any)
+	if hooks == nil {
+		return false
+	}
+	stops, _ := hooks["stop"].([]any)
+	filtered := make([]any, 0, len(stops))
+	removed := false
+	for _, stop := range stops {
+		entry, _ := stop.(map[string]any)
+		command, _ := entry["command"].(string)
+		if strings.Contains(command, "handshake_cursor_stop.py") {
+			removed = true
+			continue
+		}
+		filtered = append(filtered, stop)
+	}
+	if !removed {
+		return false
+	}
+	if len(filtered) == 0 {
+		delete(hooks, "stop")
+	} else {
+		hooks["stop"] = filtered
+	}
+	if len(hooks) == 0 {
+		delete(config, "hooks")
+	}
+	return true
 }
 
 // --- Codex MCP registration ---

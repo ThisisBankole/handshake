@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	handshakeskill "handshake/skills/handshake"
 	knowledgeauthoring "handshake/skills/knowledge-authoring"
 )
 
@@ -81,6 +82,26 @@ func TestRemoveKnowledgeAuthoringSkills_RemovesOnlyManagedFiles(t *testing.T) {
 		}
 		if !os.IsNotExist(err) {
 			t.Fatalf("managed %s skill still exists or could not be checked: %v", target.agent, err)
+		}
+	}
+}
+
+func TestInstallHandshakeSkills_InstallsManagedDefinition(t *testing.T) {
+	homeDir := t.TempDir()
+	results := installHandshakeSkills(homeDir)
+	if len(results) != 4 {
+		t.Fatalf("installed targets = %d, want 4", len(results))
+	}
+	for _, result := range results {
+		if result.err != nil || result.status != knowledgeSkillInstalled {
+			t.Fatalf("install %s = %+v", result.target.agent, result)
+		}
+		contents, err := os.ReadFile(result.target.path)
+		if err != nil {
+			t.Fatalf("read %s: %v", result.target.agent, err)
+		}
+		if string(contents) != string(handshakeskill.Definition) {
+			t.Fatalf("installed %s skill differs from embedded definition", result.target.agent)
 		}
 	}
 }

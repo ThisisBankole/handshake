@@ -21,6 +21,7 @@ import (
 	"handshake/internal/engine"
 	"handshake/internal/git"
 	"handshake/internal/timeline"
+	"handshake/internal/update"
 )
 
 type ui struct {
@@ -226,13 +227,18 @@ func (u *ui) build() {
 const viewHints = "esc back · ↑↓ scroll · d detail · t timeline · y restore · h help"
 
 func (u *ui) updateStatus() {
+	notice := ""
+	if updateStatus, err := u.db.GetUpdateStatus(); err == nil &&
+		update.IsNewer(updateStatus.InstalledVersion, updateStatus.LatestVersion) {
+		notice = fmt.Sprintf("%supdate %s available[-] · ", tag(colYellow), updateStatus.LatestVersion)
+	}
 	filter := "all agents"
 	col := colFaint
 	if agent := u.agentFilter(); agent != "" {
 		filter = agent
 		col = agentColor(agent)
 	}
-	u.status.SetText(fmt.Sprintf("%s%d sessions · %s%s[-] ",
+	u.status.SetText(notice + fmt.Sprintf("%s%d sessions · %s%s[-] ",
 		tag(colFaint), len(u.sessions), tag(col), filter))
 }
 

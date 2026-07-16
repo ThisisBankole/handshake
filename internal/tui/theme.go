@@ -32,6 +32,7 @@ var agentColors = map[string]tcell.Color{
 	"codex":       colTeal,
 	"opencode":    colGreen,
 	"hermes":      colYellow,
+	"cursor":      colRed,
 }
 
 func agentColor(agent string) tcell.Color {
