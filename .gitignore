@@ -18,3 +18,7 @@
 # OS noise
 .DS_Store
 /dist/
+img/
+
+# Local secrets (PostHog key is injected at release time from a repo secret)
+.env

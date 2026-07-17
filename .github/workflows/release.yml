@@ -29,3 +29,7 @@ jobs:
           # The default GITHUB_TOKEN cannot push to other repos; this PAT
           # lets GoReleaser commit the formula into homebrew-tools.
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          # Public write-only PostHog key, injected into the binary at build
+          # time. If the secret is unset this expands to empty and telemetry
+          # is disabled in the resulting binaries.
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}

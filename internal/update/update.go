@@ -1,4 +1,6 @@
-// Package update checks Handshake releases without sending project or session data.
+// Package update checks Handshake releases without sending project or session
+// data. Each performed check also emits an anonymous telemetry heartbeat
+// (version/OS/arch only; HANDSHAKE_NO_TELEMETRY disables it).
 package update
 
 import (
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"handshake/internal/db"
+	"handshake/internal/telemetry"
 )
 
 const (
@@ -117,7 +120,12 @@ func Start(ctx context.Context, database *db.Database, homeDir, installedVersion
 	checker := NewChecker()
 	go func() {
 		for {
-			status, _, _ := checker.Check(ctx, database, installedVersion, false)
+			status, performed, _ := checker.Check(ctx, database, installedVersion, false)
+			if performed {
+				// Ride the release-check cadence: one anonymous heartbeat
+				// per performed check, never a schedule of its own.
+				telemetry.Heartbeat(homeDir, installedVersion)
+			}
 			delay := NextCheckDelay(status, checker.Now())
 			timer := time.NewTimer(delay)
 			select {
