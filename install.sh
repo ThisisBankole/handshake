@@ -83,8 +83,31 @@ echo ""
 # when a terminal is available. CI and other non-interactive environments keep
 # the previous unattended registration path.
 
-# Kill any stale handshake serve processes that might be holding the port
-pkill -f "handshake serve" 2>/dev/null || true
+# ── Hand the running daemon over to the new binary ─────────────────────────
+# An already-running daemon keeps executing the old code it loaded at start.
+# When a managed service exists, restart it explicitly so upgrades take effect
+# immediately; otherwise just clear stale processes that may hold the port.
+
+RESTARTED=""
+if [ "$OS" = "darwin" ] && [ -f "$HOME/Library/LaunchAgents/com.handshake.serve.plist" ]; then
+  if launchctl kickstart -k "gui/$(id -u)/com.handshake.serve" 2>/dev/null; then
+    RESTARTED="yes"
+  fi
+elif [ "$OS" = "linux" ] && command -v systemctl >/dev/null 2>&1 \
+  && systemctl --user cat handshake.service >/dev/null 2>&1; then
+  if systemctl --user restart handshake.service 2>/dev/null; then
+    RESTARTED="yes"
+  fi
+fi
+
+if [ -n "$RESTARTED" ]; then
+  sleep 1 # give the daemon a moment to bind before setup probes the port
+  echo "✓ Restarted the Handshake service on $VERSION"
+else
+  # No managed service (or restart failed): kill any stale handshake serve
+  # processes that might be holding the port. Setup reinstalls the service.
+  pkill -f "handshake serve" 2>/dev/null || true
+fi
 
 if [ -t 1 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
   echo "Starting guided setup..."
