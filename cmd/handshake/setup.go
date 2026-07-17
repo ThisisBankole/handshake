@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"handshake/internal/telemetry"
 	"handshake/plugins/opencode"
 )
 
@@ -179,7 +180,34 @@ func setupCmd(homeDir, dbPath string) {
 	fmt.Println()
 	fmt.Println("Your sessions are stored locally at ~/.handshake/sessions.db")
 	fmt.Println("Session checkpoints stay local. Any enabled background writer uses its selected agent CLI and provider account.")
+	if !telemetry.Disabled() {
+		fmt.Println("An anonymous install ping (version, OS, and agent names only) helps count installs.")
+		fmt.Println("Set HANDSHAKE_NO_TELEMETRY=1 to disable.")
+	}
+	telemetry.Installed(homeDir, version, detectedAgents(homeDir))
 	fmt.Println()
+}
+
+// detectedAgents lists which supported agents exist on this machine, for the
+// anonymous install ping. Names only — no paths or configuration are sent.
+func detectedAgents(homeDir string) []string {
+	agents := []string{}
+	if _, err := exec.LookPath("claude"); err == nil {
+		agents = append(agents, "claude-code")
+	}
+	if hasCodexLocal(homeDir) {
+		agents = append(agents, "codex")
+	}
+	if _, err := exec.LookPath("opencode"); err == nil {
+		agents = append(agents, "opencode")
+	}
+	if _, err := exec.LookPath("hermes"); err == nil {
+		agents = append(agents, "hermes")
+	}
+	if _, err := exec.LookPath("cursor-agent"); err == nil {
+		agents = append(agents, "cursor")
+	}
+	return agents
 }
 
 // uninstallCmd removes everything Handshake wrote and optionally removes the binary.

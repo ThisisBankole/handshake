@@ -219,5 +219,20 @@ deletes the session database and binary.
 ## Privacy
 
 Handshake runs entirely on your machine. The daemon binds to `localhost:8765`
-and is not accessible from the network. No telemetry, no cloud sync, no
-accounts. Your sessions are stored locally at `~/.handshake/sessions.db`.
+and is not accessible from the network. No cloud sync, no accounts. Your
+sessions are stored locally at `~/.handshake/sessions.db`.
+
+### Anonymous usage ping
+
+To count installs and active versions, Handshake sends two anonymous events:
+one when setup completes, and a weekly heartbeat piggybacked on the existing
+release check. Each event contains only the Handshake version, operating
+system, architecture, on install the names of detected agents, and a random
+per-machine ID stored at `~/.handshake/telemetry_id`. No session content,
+project names, paths, or account information is ever sent.
+
+Opt out at any time:
+
+```sh
+export HANDSHAKE_NO_TELEMETRY=1
+```
