@@ -27,6 +27,7 @@ const (
 )
 
 type knowledgeSkillInstallResult struct {
+	skill  string
 	target knowledgeSkillTarget
 	status knowledgeSkillInstallStatus
 	err    error
@@ -51,17 +52,17 @@ func handshakeSkillTargets(homeDir string) []knowledgeSkillTarget {
 }
 
 func installKnowledgeAuthoringSkills(homeDir string) []knowledgeSkillInstallResult {
-	return installManagedSkills(knowledgeSkillTargets(homeDir), knowledgeauthoring.Definition)
+	return installManagedSkills(knowledgeSkillName, knowledgeSkillTargets(homeDir), knowledgeauthoring.Definition)
 }
 
 func installHandshakeSkills(homeDir string) []knowledgeSkillInstallResult {
-	return installManagedSkills(handshakeSkillTargets(homeDir), handshakeskill.Definition)
+	return installManagedSkills(handshakeSkillName, handshakeSkillTargets(homeDir), handshakeskill.Definition)
 }
 
-func installManagedSkills(targets []knowledgeSkillTarget, definition []byte) []knowledgeSkillInstallResult {
+func installManagedSkills(skill string, targets []knowledgeSkillTarget, definition []byte) []knowledgeSkillInstallResult {
 	results := make([]knowledgeSkillInstallResult, 0, len(targets))
 	for _, target := range targets {
-		result := knowledgeSkillInstallResult{target: target}
+		result := knowledgeSkillInstallResult{skill: skill, target: target}
 		existing, err := os.ReadFile(target.path)
 		exists := err == nil
 		switch {
@@ -89,13 +90,13 @@ func printKnowledgeSkillInstallResults(results []knowledgeSkillInstallResult) {
 	for _, result := range results {
 		switch {
 		case result.err != nil:
-			fmt.Printf("✗ %s skill: could not install: %v\n", result.target.agent, result.err)
+			fmt.Printf("✗ %s: could not install %s skill: %v\n", result.target.agent, result.skill, result.err)
 		case result.status == knowledgeSkillUserOwned:
-			fmt.Printf("- %s skill: kept user-owned %s\n", result.target.agent, result.target.path)
+			fmt.Printf("- %s: kept user-owned %s skill at %s\n", result.target.agent, result.skill, result.target.path)
 		case result.status == knowledgeSkillInstalled:
-			fmt.Printf("✓ %s skill: installed\n", result.target.agent)
+			fmt.Printf("✓ %s: %s skill installed\n", result.target.agent, result.skill)
 		default:
-			fmt.Printf("✓ %s skill: updated\n", result.target.agent)
+			fmt.Printf("✓ %s: %s skill updated\n", result.target.agent, result.skill)
 		}
 	}
 }
