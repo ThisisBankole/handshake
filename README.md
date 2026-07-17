@@ -4,8 +4,10 @@
 
 Handshake is a local-first session portability daemon for AI coding agents.
 It runs silently in the background, keeping your sessions synced across
-Claude Code, OpenCode, Hermes, and Codex. Hit a token limit and switch
-agents, your context is already there.
+Claude Code, OpenCode, Hermes, Codex, and Cursor. Hit a token limit and
+switch agents, your context is already there.
+
+**Full documentation: [docs.gethandshake.dev](https://docs.gethandshake.dev)**
 
 ## How it works
 
@@ -26,7 +28,7 @@ current state, files modified, and next steps.
 
 **Mac and Linux (curl):**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ThisisBankole/handshake/main/install.sh | sh
+curl -fsSL https://gethandshake.dev/install.sh | sh
 ```
 
 
@@ -52,36 +54,6 @@ handshake setup
 Takes about 30 seconds. Handshake registers with your agents, installs
 itself as a login service, and starts the daemon. After that it runs
 invisibly in the background.
-
-## Updates
-
-The daemon checks GitHub Releases in the background once a week and stores only
-the release result locally. It sends no project or session data. A newer release
-appears in the session browser, `handshake version`, and the
-`get_handshake_update_status` MCP tool.
-
-## Testing
-
-Run the regular suite from the repository root:
-
-```bash
-go test ./...
-```
-
-On Apple silicon Macs with the Apple Container CLI, run the same suite in a
-clean Linux environment:
-
-```bash
-# One-time machine setup
-container system start
-
-# Builds an isolated image and runs the tests without mounting your home directory.
-sh scripts/test-container.sh
-```
-
-The container test installs Go and Git, copies only the repository source into
-the image, and runs `go test ./...`. It does not mount your Handshake database
-or agent configuration, so it is suitable for migration and release checks.
 
 ## Project Knowledge
 
