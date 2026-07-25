@@ -140,7 +140,13 @@ func (a *ClaudeCodeAdapter) ReadSession(projectID, sessionID string) (*SessionDa
 }
 
 func (a *ClaudeCodeAdapter) findSessionFile(projectID, sessionID string) (string, error) {
+	if !safeSessionPathComponent(sessionID) {
+		return "", fmt.Errorf("invalid Claude Code session ID %q", sessionID)
+	}
 	if projectID != "" {
+		if !safeSessionPathComponent(projectID) {
+			return "", fmt.Errorf("invalid Claude Code project ID %q", projectID)
+		}
 		path := filepath.Join(a.projectsDir, projectID, sessionID+".jsonl")
 		if _, err := os.Stat(path); err != nil {
 			return "", fmt.Errorf("session file not found: %s", path)
@@ -162,6 +168,21 @@ func (a *ClaudeCodeAdapter) findSessionFile(projectID, sessionID string) (string
 		}
 	}
 	return "", fmt.Errorf("session %s not found in any Claude Code project", sessionID)
+}
+
+func safeSessionPathComponent(value string) bool {
+	if value == "" || value == "." || value == ".." || filepath.Base(value) != value {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			character == '-' || character == '_' || character == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 // flattenClaudeContent turns a message content (plain string or block array)

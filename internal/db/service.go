@@ -32,6 +32,20 @@ type Session struct {
 	UpdatedAt int64
 }
 
+// SessionListItem is the enriched read model used by session discovery. Project
+// metadata is joined at read time so the canonical session record remains
+// independent of presentation concerns.
+type SessionListItem struct {
+	ID               string
+	ProjectID        string
+	Title            string
+	Agent            string
+	WorkingDir       string
+	UpdatedAt        int64
+	ProjectRemoteURL string
+	ProjectRoot      string
+}
+
 type Message struct {
 	ID        string
 	SessionID string
@@ -143,8 +157,19 @@ type Database struct {
 }
 
 func New(dbPath string) (*Database, error) {
-	if err := os.MkdirAll(path.Dir(dbPath), 0755); err != nil {
+	databaseDir := path.Dir(dbPath)
+	if err := os.MkdirAll(databaseDir, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
+	}
+	if err := os.Chmod(databaseDir, 0700); err != nil {
+		return nil, fmt.Errorf("failed to protect database directory: %w", err)
+	}
+	// Harden existing installations before SQLite opens the file. New database,
+	// WAL, and shared-memory files are protected again after schema setup.
+	for _, candidate := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		if err := chmodIfExists(candidate, 0600); err != nil {
+			return nil, fmt.Errorf("failed to protect database file: %w", err)
+		}
 	}
 
 	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)", dbPath)
@@ -165,8 +190,21 @@ func New(dbPath string) (*Database, error) {
 		conn.Close()
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
+	for _, candidate := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		if err := chmodIfExists(candidate, 0600); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("failed to protect database file: %w", err)
+		}
+	}
 
 	return db, nil
+}
+
+func chmodIfExists(path string, mode os.FileMode) error {
+	if err := os.Chmod(path, mode); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func (d *Database) initSchema() error {
@@ -547,6 +585,49 @@ func (d *Database) ListSessions(agent string) ([]*Session, error) {
 	}
 
 	return sessions, nil
+}
+
+// ListSessionItems returns sessions with enough project metadata for clients to
+// display stable, human-readable project and directory information.
+func (d *Database) ListSessionItems(agent string) ([]*SessionListItem, error) {
+	query := `SELECT s.id, s.project_id, s.title, s.agent, s.working_dir, s.updated_at,
+		COALESCE(p.remote_url, ''),
+		COALESCE((
+			SELECT pi.root_path
+			FROM git_snapshots gs
+			JOIN project_instances pi ON pi.id = gs.instance_id
+			WHERE gs.session_id = s.id
+			ORDER BY gs.id DESC
+			LIMIT 1
+		), '')
+		FROM sessions s
+		LEFT JOIN projects p ON p.id = s.project_id`
+	args := []any{}
+	if agent != "" {
+		query += " WHERE s.agent = ?"
+		args = append(args, agent)
+	}
+	query += " ORDER BY s.updated_at DESC"
+
+	rows, err := d.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list enriched sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var items []*SessionListItem
+	for rows.Next() {
+		item := &SessionListItem{}
+		if err := rows.Scan(&item.ID, &item.ProjectID, &item.Title, &item.Agent,
+			&item.WorkingDir, &item.UpdatedAt, &item.ProjectRemoteURL, &item.ProjectRoot); err != nil {
+			return nil, fmt.Errorf("failed to scan enriched session: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating enriched sessions: %w", err)
+	}
+	return items, nil
 }
 
 func (d *Database) StoreBrief(sessionID string, content string) error {

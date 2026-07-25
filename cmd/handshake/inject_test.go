@@ -63,3 +63,18 @@ func TestBaseURL_KeepsEnvURLWithoutMCPPath(t *testing.T) {
 		t.Fatalf("got %q, want http://localhost:8766", got)
 	}
 }
+
+func TestOpenCodePluginContentsUsesDaemonBaseURL(t *testing.T) {
+	t.Setenv("HANDSHAKE_URL", "http://localhost:8766/mcp")
+
+	contents := openCodePluginContents()
+	if bytes.Contains(contents, []byte("http://localhost:8765")) {
+		t.Fatalf("OpenCode plugin retained default port:\n%s", contents)
+	}
+	if !bytes.Contains(contents, []byte("http://localhost:8766")) {
+		t.Fatalf("OpenCode plugin omitted configured daemon URL:\n%s", contents)
+	}
+	if !bytes.Contains(contents, []byte(`replace(/\/mcp\/?$/, "")`)) {
+		t.Fatalf("OpenCode plugin does not normalize HANDSHAKE_URL:\n%s", contents)
+	}
+}

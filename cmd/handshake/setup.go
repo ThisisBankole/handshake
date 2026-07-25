@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"handshake/internal/telemetry"
-	"handshake/plugins/opencode"
 )
 
 // setupCmd runs the guided onboarding flow. It is triggered automatically
@@ -86,7 +85,7 @@ func setupCmd(homeDir, dbPath string) {
 	pluginPath := filepath.Join(homeDir, ".config", "opencode", "plugins", "handshake.js")
 	if err := os.MkdirAll(filepath.Dir(pluginPath), 0755); err != nil {
 		fmt.Printf("  ✗ Could not create OpenCode plugin directory: %v\n", err)
-	} else if err := os.WriteFile(pluginPath, opencode.PluginJS, 0644); err != nil {
+	} else if err := os.WriteFile(pluginPath, openCodePluginContents(), 0644); err != nil {
 		fmt.Printf("  ✗ Could not install OpenCode plugin: %v\n", err)
 	} else {
 		fmt.Printf("  ✓ OpenCode plugin installed\n")

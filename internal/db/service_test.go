@@ -2,10 +2,92 @@ package db
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 )
+
+func TestNew_ProtectsDatabaseFilesAndDirectory(t *testing.T) {
+	root := t.TempDir()
+	databaseDir := filepath.Join(root, ".handshake")
+	databasePath := filepath.Join(databaseDir, "sessions.db")
+
+	database, err := New(databasePath)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	defer database.Close()
+
+	for path, want := range map[string]os.FileMode{
+		databaseDir:  0700,
+		databasePath: 0600,
+	} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("Stat(%s): %v", path, err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("%s permissions = %#o, want %#o", path, got, want)
+		}
+	}
+}
+
+func TestNew_HardensExistingDatabasePermissions(t *testing.T) {
+	root := t.TempDir()
+	databaseDir := filepath.Join(root, ".handshake")
+	databasePath := filepath.Join(databaseDir, "sessions.db")
+	database, err := New(databasePath)
+	if err != nil {
+		t.Fatalf("initial New failed: %v", err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := os.Chmod(databaseDir, 0755); err != nil {
+		t.Fatalf("Chmod directory: %v", err)
+	}
+	if err := os.Chmod(databasePath, 0644); err != nil {
+		t.Fatalf("Chmod database: %v", err)
+	}
+
+	database, err = New(databasePath)
+	if err != nil {
+		t.Fatalf("reopen New failed: %v", err)
+	}
+	defer database.Close()
+	dirInfo, _ := os.Stat(databaseDir)
+	fileInfo, _ := os.Stat(databasePath)
+	if dirInfo.Mode().Perm() != 0700 || fileInfo.Mode().Perm() != 0600 {
+		t.Fatalf("permissions after reopen = dir %#o, file %#o", dirInfo.Mode().Perm(), fileInfo.Mode().Perm())
+	}
+}
+
+func TestListSessionItemsFiltersAndOrdersByUpdatedTime(t *testing.T) {
+	database, err := New(filepath.Join(t.TempDir(), "sessions.db"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	for _, session := range []*Session{
+		{ID: "older", Title: "Older", Agent: "claude-code", UpdatedAt: 100},
+		{ID: "other-agent", Title: "Other", Agent: "codex", UpdatedAt: 300},
+		{ID: "newer", Title: "Newer", Agent: "claude-code", UpdatedAt: 200},
+	} {
+		if err := database.StoreSession(session); err != nil {
+			t.Fatalf("StoreSession(%s): %v", session.ID, err)
+		}
+	}
+
+	items, err := database.ListSessionItems("claude-code")
+	if err != nil {
+		t.Fatalf("ListSessionItems: %v", err)
+	}
+	if len(items) != 2 || items[0].ID != "newer" || items[1].ID != "older" {
+		t.Fatalf("ListSessionItems order/filter = %+v", items)
+	}
+}
 
 func TestNew_LimitsOpenConnections(t *testing.T) {
 	d, err := New(filepath.Join(t.TempDir(), "test.db"))
