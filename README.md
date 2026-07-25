@@ -162,7 +162,7 @@ handshake setup
 
 **Changing the port on an existing service install (macOS):**
 Add an `EnvironmentVariables` block to the launchd plist at
-`~/Library/LaunchAgents/com.handshake.daemon.plist`, then re-run `handshake setup`
+`~/Library/LaunchAgents/com.handshake.serve.plist`, then re-run `handshake setup`
 to update agent registrations:
 
 ```xml
@@ -175,8 +175,8 @@ to update agent registrations:
 
 Then reload:
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.handshake.daemon.plist
-launchctl load  ~/Library/LaunchAgents/com.handshake.daemon.plist
+launchctl unload ~/Library/LaunchAgents/com.handshake.serve.plist
+launchctl load  ~/Library/LaunchAgents/com.handshake.serve.plist
 ```
 
 ## Uninstall

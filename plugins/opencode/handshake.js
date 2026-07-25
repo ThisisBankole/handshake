@@ -7,7 +7,11 @@
 //   session.compacted         → capture OpenCode's compaction summary
 //   experimental.session.compacting → inject handoff brief format into compaction
 
-const BASE_URL = process.env.HANDSHAKE_URL ?? "http://localhost:8765"
+// HANDSHAKE_URL is the MCP endpoint (normally ending in /mcp), while this
+// plugin calls the daemon's plain HTTP routes. Normalize either form.
+const BASE_URL = (process.env.HANDSHAKE_BASE_URL ?? process.env.HANDSHAKE_URL ?? "http://localhost:8765")
+  .replace(/\/mcp\/?$/, "")
+  .replace(/\/$/, "")
 
 // Debounce timers keyed by session ID
 const syncPending = new Map()

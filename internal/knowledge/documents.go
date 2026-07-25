@@ -2,7 +2,9 @@ package knowledge
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -89,19 +91,35 @@ func (w *Writer) PublishDocument(input *DocumentInput) (*db.KnowledgeState, erro
 		GeneratedBy:     valueOr(input.GeneratedBy, "agent"),
 		GeneratedAt:     time.Now().Unix(),
 	}
-	// Write first. If facts change immediately afterwards, the database rejects
-	// the stale revision and the file's own frontmatter remains honest.
-	if err := writePrivateFile(filepath.Join(bundleDir, definition.path), content); err != nil {
-		return nil, err
+	documentPath := filepath.Join(bundleDir, definition.path)
+	previous, readErr := os.ReadFile(documentPath)
+	hadPrevious := readErr == nil
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return nil, fmt.Errorf("read existing knowledge document: %w", readErr)
 	}
-	updatedState, err := w.database.StoreKnowledgeDocument(document)
+	updatedState, err := w.database.PublishKnowledgeDocument(document, func() error {
+		return writePrivateFile(documentPath, content)
+	})
 	if err != nil {
+		if rollbackErr := rollbackPublishedDocument(documentPath, previous, hadPrevious); rollbackErr != nil {
+			return nil, errors.Join(err, fmt.Errorf("roll back knowledge document: %w", rollbackErr))
+		}
 		return nil, err
 	}
 	if err := w.refreshRootIndex(bundleDir, input.ProjectID, updatedState); err != nil {
 		return nil, err
 	}
 	return updatedState, nil
+}
+
+func rollbackPublishedDocument(path string, previous []byte, hadPrevious bool) error {
+	if hadPrevious {
+		return writePrivateFile(path, string(previous))
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func authoredDocumentContent(definition documentDefinition, input *DocumentInput, body string) string {

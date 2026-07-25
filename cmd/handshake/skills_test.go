@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	handshakeskill "handshake/skills/handshake"
@@ -102,6 +103,24 @@ func TestInstallHandshakeSkills_InstallsManagedDefinition(t *testing.T) {
 		}
 		if string(contents) != string(handshakeskill.Definition) {
 			t.Fatalf("installed %s skill differs from embedded definition", result.target.agent)
+		}
+	}
+}
+
+func TestHandshakeSkillDefinesStructuredSessionListFormat(t *testing.T) {
+	definition := string(handshakeskill.Definition)
+	for _, expected := range []string{
+		"When the user asks to list",
+		"`list_sessions`",
+		"Use its structured content",
+		"| Session | Agent | Updated | Directory | Project | ID |",
+		"`updated_relative`",
+		"`project_name`",
+		"Always include the session ID",
+		"synchronization warnings below the list",
+	} {
+		if !strings.Contains(definition, expected) {
+			t.Errorf("Handshake skill omitted %q", expected)
 		}
 	}
 }

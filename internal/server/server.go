@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -32,6 +34,22 @@ type Server struct {
 	version string
 }
 
+type sessionListResult struct {
+	Sessions []sessionListEntry `json:"sessions"`
+	Warnings []string           `json:"warnings"`
+}
+
+type sessionListEntry struct {
+	ID               string `json:"id"`
+	Title            string `json:"title"`
+	Agent            string `json:"agent"`
+	UpdatedAt        string `json:"updated_at"`
+	UpdatedRelative  string `json:"updated_relative"`
+	WorkingDirectory string `json:"working_directory"`
+	ProjectName      string `json:"project_name"`
+	ProjectID        string `json:"project_id"`
+}
+
 func New(name, version, homeDir string, database *db.Database) *Server {
 	s := &Server{
 		db:      database,
@@ -47,6 +65,9 @@ func New(name, version, homeDir string, database *db.Database) *Server {
 // Serve blocks, listening on addr. MCP is served on /mcp, session ingestion
 // on /ingest, health on /health.
 func (s *Server) Serve(addr string) error {
+	if err := validateLoopbackAddr(addr); err != nil {
+		return err
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", mcpserver.NewStreamableHTTPServer(s.mcp))
 	mux.HandleFunc("/ingest", s.handleIngest)
@@ -57,7 +78,57 @@ func (s *Server) Serve(addr string) error {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "ok")
 	})
-	return http.ListenAndServe(addr, mux)
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           protectLocalHTTP(mux),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	return server.ListenAndServe()
+}
+
+const maxRequestBytes = 32 << 20
+
+func validateLoopbackAddr(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("invalid Handshake listen address %q: %w", addr, err)
+	}
+	if strings.EqualFold(host, "localhost") {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("refusing non-loopback Handshake listen address %q; session data must remain local", addr)
+	}
+	return nil
+}
+
+func protectLocalHTTP(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); origin != "" && !isLoopbackOrigin(origin) {
+			http.Error(w, "cross-origin requests are not allowed", http.StatusForbidden)
+			return
+		}
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isLoopbackOrigin(origin string) bool {
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Scheme == "" || parsed.Hostname() == "" {
+		return false
+	}
+	host := parsed.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *Server) addTools() {
@@ -125,7 +196,8 @@ func (s *Server) addTools() {
 
 	s.mcp.AddTool(
 		mcp.NewTool("list_sessions",
-			mcp.WithDescription("List recent checkpointed sessions with IDs, titles, and relative timestamps"),
+			mcp.WithDescription("List recent checkpointed sessions with structured IDs, titles, agents, timestamps, working directories, and project names"),
+			mcp.WithOutputSchema[sessionListResult](),
 			mcp.WithString("agent",
 				mcp.Description("Filter by agent type (optional)"),
 				mcp.Enum("claude-code", "opencode", "hermes", "codex", "cursor"),
@@ -356,27 +428,108 @@ func (s *Server) handleListSessions(request mcp.CallToolRequest) (*mcp.CallToolR
 		warnings = adapters.SyncWarnings([]adapters.SyncResult{result})
 	}
 
-	sessions, err := s.db.ListSessions(agent)
+	sessions, err := s.db.ListSessionItems(agent)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
+	}
+	structured := sessionListResult{
+		Sessions: make([]sessionListEntry, 0, len(sessions)),
+		Warnings: append([]string{}, warnings...),
+	}
+	for _, session := range sessions {
+		structured.Sessions = append(structured.Sessions, sessionListEntry{
+			ID:               session.ID,
+			Title:            session.Title,
+			Agent:            session.Agent,
+			UpdatedAt:        formattedTimestamp(session.UpdatedAt),
+			UpdatedRelative:  relativeTime(session.UpdatedAt),
+			WorkingDirectory: session.WorkingDir,
+			ProjectName:      deriveProjectName(session.ProjectRemoteURL, session.ProjectRoot, session.WorkingDir),
+			ProjectID:        session.ProjectID,
+		})
 	}
 	if len(sessions) == 0 {
 		message := "No sessions found"
 		if len(warnings) > 0 {
 			message += "\nWarning: " + strings.Join(warnings, "; ")
 		}
-		return mcp.NewToolResultText(message), nil
+		return mcp.NewToolResultStructured(structured, message), nil
 	}
 
 	var b strings.Builder
-	b.WriteString("Recent sessions:\n")
-	for _, session := range sessions {
-		fmt.Fprintf(&b, "- %s | %s (%s, %s)\n", session.ID, session.Title, session.Agent, relativeTime(session.UpdatedAt))
+	b.WriteString("Recent sessions:\n\n")
+	b.WriteString("| Session | Agent | Updated | Directory | Project | ID |\n")
+	b.WriteString("|---|---|---|---|---|---|\n")
+	for _, session := range structured.Sessions {
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s |\n",
+			markdownCell(session.Title),
+			markdownCell(session.Agent),
+			markdownCell(session.UpdatedRelative),
+			markdownCell(valueOrDash(shortenHomePath(s.homeDir, session.WorkingDirectory))),
+			markdownCell(valueOrDash(session.ProjectName)),
+			markdownCell(session.ID),
+		)
 	}
 	if len(warnings) > 0 {
-		b.WriteString("Warning: " + strings.Join(warnings, "; ") + "\n")
+		b.WriteString("\nWarning: " + strings.Join(warnings, "; ") + "\n")
 	}
-	return mcp.NewToolResultText(b.String()), nil
+	return mcp.NewToolResultStructured(structured, b.String()), nil
+}
+
+func deriveProjectName(remoteURL, projectRoot, workingDir string) string {
+	if remote := strings.TrimRight(strings.TrimSpace(remoteURL), "/"); remote != "" {
+		if slash := strings.LastIndex(remote, "/"); slash >= 0 {
+			remote = remote[slash+1:]
+		}
+		remote = strings.TrimSuffix(remote, ".git")
+		if remote != "" && remote != "." {
+			return remote
+		}
+	}
+	for _, candidate := range []string{projectRoot, workingDir} {
+		if candidate = strings.TrimSpace(candidate); candidate != "" {
+			base := filepath.Base(filepath.Clean(candidate))
+			if base != "" && base != "." && base != string(filepath.Separator) {
+				return base
+			}
+		}
+	}
+	return ""
+}
+
+func shortenHomePath(homeDir, workingDir string) string {
+	if strings.TrimSpace(workingDir) == "" {
+		return ""
+	}
+	home := filepath.Clean(homeDir)
+	working := filepath.Clean(workingDir)
+	if working == home {
+		return "~"
+	}
+	if strings.HasPrefix(working, home+string(filepath.Separator)) {
+		return "~" + strings.TrimPrefix(working, home)
+	}
+	return workingDir
+}
+
+func formattedTimestamp(unix int64) string {
+	if unix <= 0 {
+		return ""
+	}
+	return time.Unix(unix, 0).UTC().Format(time.RFC3339)
+}
+
+func markdownCell(value string) string {
+	value = strings.ReplaceAll(value, "\r", " ")
+	value = strings.ReplaceAll(value, "\n", " ")
+	return strings.ReplaceAll(value, "|", `\|`)
+}
+
+func valueOrDash(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "—"
+	}
+	return value
 }
 
 func (s *Server) handleBriefRequest(request mcp.CallToolRequest, restore bool) (*mcp.CallToolResult, error) {
@@ -556,6 +709,9 @@ func clipSearchResult(content string) string {
 }
 
 func relativeTime(unix int64) string {
+	if unix <= 0 {
+		return "unknown"
+	}
 	d := time.Since(time.Unix(unix, 0))
 	switch {
 	case d < time.Minute:

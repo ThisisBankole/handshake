@@ -140,6 +140,21 @@ func (d *Database) RecordKnowledgeCheckpoint(checkpoint *KnowledgeCheckpoint) (*
 // document must be based on the latest factual revision; this prevents a late
 // agent response from silently making stale knowledge appear current.
 func (d *Database) StoreKnowledgeDocument(document *KnowledgeDocument) (*KnowledgeState, error) {
+	return d.storeKnowledgeDocument(document, nil)
+}
+
+// PublishKnowledgeDocument runs publish after the facts revision has been
+// validated while the database's single connection is reserved by the
+// transaction. This prevents a checkpoint from advancing the revision between
+// validation and the corresponding atomic filesystem publication.
+func (d *Database) PublishKnowledgeDocument(document *KnowledgeDocument, publish func() error) (*KnowledgeState, error) {
+	if publish == nil {
+		return nil, fmt.Errorf("knowledge document publish callback is required")
+	}
+	return d.storeKnowledgeDocument(document, publish)
+}
+
+func (d *Database) storeKnowledgeDocument(document *KnowledgeDocument, publish func() error) (*KnowledgeState, error) {
 	if document == nil || document.ProjectID == "" || document.Path == "" || document.Type == "" {
 		return nil, fmt.Errorf("knowledge document requires project ID, path, and type")
 	}
@@ -158,6 +173,11 @@ func (d *Database) StoreKnowledgeDocument(document *KnowledgeDocument) (*Knowled
 	}
 	if document.FactsRevision != state.FactsRevision {
 		return nil, fmt.Errorf("%w: document=%d current=%d", ErrKnowledgeFactsStale, document.FactsRevision, state.FactsRevision)
+	}
+	if publish != nil {
+		if err := publish(); err != nil {
+			return nil, fmt.Errorf("publish knowledge document: %w", err)
+		}
 	}
 	if document.GeneratedAt == 0 {
 		document.GeneratedAt = time.Now().Unix()

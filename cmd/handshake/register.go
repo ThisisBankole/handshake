@@ -14,6 +14,7 @@ import (
 	codexplugin "handshake/plugins/codex"
 	cursorplugin "handshake/plugins/cursor"
 	hermesplugin "handshake/plugins/hermes"
+	"handshake/plugins/opencode"
 )
 
 func registerAgents(homeDir string) {
@@ -78,6 +79,10 @@ func baseURL() string {
 // baked in at install time.
 func injectBaseURL(script []byte, baseURL string) []byte {
 	return bytes.ReplaceAll(script, []byte("http://localhost:8765"), []byte(baseURL))
+}
+
+func openCodePluginContents() []byte {
+	return injectBaseURL(opencode.PluginJS, baseURL())
 }
 
 // resolvePython returns the absolute path to a Python 3 interpreter, preferring

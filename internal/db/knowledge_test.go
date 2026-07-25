@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 func newKnowledgeCheckpoint(fingerprint string) *KnowledgeCheckpoint {
@@ -200,6 +201,56 @@ func TestStoreKnowledgeDocument_RequiresBothDocumentsAndInvalidatesOlderFacts(t 
 	brief.FactsRevision = 1
 	if _, err := database.StoreKnowledgeDocument(brief); !errors.Is(err, ErrKnowledgeFactsStale) {
 		t.Fatalf("stale document error = %v, want ErrKnowledgeFactsStale", err)
+	}
+}
+
+func TestPublishKnowledgeDocumentSerializesRevisionCheckAndPublication(t *testing.T) {
+	database, err := New(filepath.Join(t.TempDir(), "knowledge.db"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer database.Close()
+
+	state, err := database.RecordKnowledgeCheckpoint(newKnowledgeCheckpoint("snapshot-a"))
+	if err != nil {
+		t.Fatalf("RecordKnowledgeCheckpoint: %v", err)
+	}
+	document := &KnowledgeDocument{
+		ProjectID: "project-1", Path: "project-brief.md", Type: KnowledgeDocumentProjectBrief,
+		FactsRevision: state.FactsRevision,
+	}
+	publishStarted := make(chan struct{})
+	releasePublish := make(chan struct{})
+	publishDone := make(chan error, 1)
+	go func() {
+		_, err := database.PublishKnowledgeDocument(document, func() error {
+			close(publishStarted)
+			<-releasePublish
+			return nil
+		})
+		publishDone <- err
+	}()
+	<-publishStarted
+
+	checkpointDone := make(chan error, 1)
+	go func() {
+		next := newKnowledgeCheckpoint("snapshot-b")
+		next.Snapshot.Commit = "def456"
+		_, err := database.RecordKnowledgeCheckpoint(next)
+		checkpointDone <- err
+	}()
+	select {
+	case err := <-checkpointDone:
+		t.Fatalf("checkpoint completed during publication: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releasePublish)
+	if err := <-publishDone; err != nil {
+		t.Fatalf("PublishKnowledgeDocument: %v", err)
+	}
+	if err := <-checkpointDone; err != nil {
+		t.Fatalf("RecordKnowledgeCheckpoint: %v", err)
 	}
 }
 
