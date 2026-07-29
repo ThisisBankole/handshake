@@ -1,0 +1,82 @@
+name: Buzz notifications
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, closed]
+  issues:
+    types: [opened, reopened, closed]
+  release:
+    types: [published]
+  workflow_run:
+    workflows: [ci, release]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    if: >-
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'failure') &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send update to Buzz
+        env:
+          BUZZ_WEBHOOK_SECRET: ${{ secrets.BUZZ_WEBHOOK_SECRET }}
+          BUZZ_WEBHOOK_URL: ${{ secrets.BUZZ_WEBHOOK_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "$GITHUB_EVENT_NAME" in
+            push)
+              update="pushed to ${GITHUB_REF_NAME}"
+              summary="$(jq -r '.head_commit.message // "New commits"' "$GITHUB_EVENT_PATH" | head -n 1)"
+              url="$(jq -r '.compare // .repository.html_url' "$GITHUB_EVENT_PATH")"
+              ;;
+            pull_request)
+              action="$(jq -r '.action' "$GITHUB_EVENT_PATH")"
+              update="pull request ${action}"
+              summary="$(jq -r '.pull_request.title' "$GITHUB_EVENT_PATH")"
+              url="$(jq -r '.pull_request.html_url' "$GITHUB_EVENT_PATH")"
+              ;;
+            issues)
+              action="$(jq -r '.action' "$GITHUB_EVENT_PATH")"
+              update="issue ${action}"
+              summary="$(jq -r '.issue.title' "$GITHUB_EVENT_PATH")"
+              url="$(jq -r '.issue.html_url' "$GITHUB_EVENT_PATH")"
+              ;;
+            release)
+              update="release published"
+              summary="$(jq -r '.release.name // .release.tag_name' "$GITHUB_EVENT_PATH")"
+              url="$(jq -r '.release.html_url' "$GITHUB_EVENT_PATH")"
+              ;;
+            workflow_run)
+              update="CI failed"
+              summary="$(jq -r '.workflow_run.name + " on " + .workflow_run.head_branch' "$GITHUB_EVENT_PATH")"
+              url="$(jq -r '.workflow_run.html_url' "$GITHUB_EVENT_PATH")"
+              ;;
+            *)
+              echo "Unsupported event: $GITHUB_EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+
+          message="$(printf '🐙 **%s** — %s\n%s\nby @%s\n%s' \
+            "$GITHUB_REPOSITORY" "$update" "$summary" "$GITHUB_ACTOR" "$url")"
+
+          jq -n --arg message "$message" '{message: $message}' |
+            curl \
+              --fail-with-body \
+              --silent \
+              --show-error \
+              --retry 3 \
+              --retry-all-errors \
+              -H "Content-Type: application/json" \
+              -H "X-Webhook-Secret: ${BUZZ_WEBHOOK_SECRET}" \
+              --data-binary @- \
+              "$BUZZ_WEBHOOK_URL"
