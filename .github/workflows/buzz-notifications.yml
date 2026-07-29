@@ -32,6 +32,22 @@ jobs:
         run: |
           set -euo pipefail
 
+          BUZZ_WEBHOOK_URL="$(printf '%s' "${BUZZ_WEBHOOK_URL:-}" | tr -d '\r\n')"
+          BUZZ_WEBHOOK_SECRET="$(printf '%s' "${BUZZ_WEBHOOK_SECRET:-}" | tr -d '\r\n')"
+
+          if [[ -z "$BUZZ_WEBHOOK_URL" || -z "$BUZZ_WEBHOOK_SECRET" ]]; then
+            echo "::notice::Buzz notifications are not configured; skipping."
+            exit 0
+          fi
+
+          case "$BUZZ_WEBHOOK_URL" in
+            http://*|https://*) ;;
+            *)
+              echo "ERROR: BUZZ_WEBHOOK_URL must use http:// or https://." >&2
+              exit 1
+              ;;
+          esac
+
           case "$GITHUB_EVENT_NAME" in
             push)
               update="pushed to ${GITHUB_REF_NAME}"
@@ -57,12 +73,12 @@ jobs:
               ;;
             workflow_run)
               update="CI failed"
-              summary="$(jq -r '.workflow_run.name + " on " + .workflow_run.head_branch' "$GITHUB_EVENT_PATH")"
+              summary="$(jq -r '(.workflow_run.name // "workflow") + " on " + (.workflow_run.head_branch // "unknown")' "$GITHUB_EVENT_PATH")"
               url="$(jq -r '.workflow_run.html_url' "$GITHUB_EVENT_PATH")"
               ;;
             *)
-              echo "Unsupported event: $GITHUB_EVENT_NAME" >&2
-              exit 1
+              echo "::notice::Skipping unsupported event: $GITHUB_EVENT_NAME"
+              exit 0
               ;;
           esac
 
