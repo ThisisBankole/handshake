@@ -199,7 +199,7 @@ func serveCmd(homeDir, dbPath string) {
 
 	srv := server.New("handshake", version, homeDir, database)
 	go authoring.NewWorker(database, homeDir, nil).WithMCPURL("http://" + addr + "/mcp").Start(context.Background())
-	update.Start(context.Background(), database, version)
+	update.Start(context.Background(), database, homeDir, version)
 	telemetry.StartDaily(context.Background(), homeDir, version, func(sinceUnix int64) map[string]any {
 		return heartbeatProperties(database, homeDir, sinceUnix)
 	})

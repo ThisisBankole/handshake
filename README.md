@@ -61,6 +61,28 @@ The setup takes approximately 30 seconds. The setup does these steps:
 After the setup, the daemon operates in the background. No attention is
 necessary.
 
+## Updates
+
+The daemon checks for a new release each week. If a new release is
+available, the daemon updates itself. The daemon does these steps:
+
+1. It downloads the new release from GitHub.
+2. It calculates the SHA-256 checksum of the download. It compares the
+   checksum with the value in the release `checksums.txt` file. If the
+   values are different, the daemon stops and keeps the current version.
+3. It replaces the binary with the new version in one atomic step.
+4. It exits. The login service (launchd or systemd) starts the daemon
+   again with the new version.
+
+Automatic updates operate only for a login-service install. The daemon
+does not change a Homebrew binary; use `brew upgrade handshake` for a
+Homebrew install. To stop automatic updates, set this variable before the
+daemon starts:
+
+```bash
+export HANDSHAKE_NO_AUTO_UPDATE=1
+```
+
 ## Project Knowledge
 
 Each checkpoint that has Git data writes a knowledge bundle to

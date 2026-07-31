@@ -182,6 +182,9 @@ func setupCmd(homeDir, dbPath string) {
 	fmt.Println()
 	fmt.Println("Your sessions are stored locally at ~/.handshake/sessions.db")
 	fmt.Println("Session checkpoints stay local. Any enabled background writer uses its selected agent CLI and provider account.")
+	if serviceInstalled {
+		fmt.Println("The daemon updates itself weekly to the latest verified release. Set HANDSHAKE_NO_AUTO_UPDATE=1 to disable.")
+	}
 	if !telemetry.Disabled() {
 		fmt.Println("Anonymous usage pings (version, OS, agent names, and feature-usage counts only)")
 		fmt.Println("help improve Handshake. Set HANDSHAKE_NO_TELEMETRY=1 to disable.")

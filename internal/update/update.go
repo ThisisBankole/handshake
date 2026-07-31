@@ -1,12 +1,14 @@
 // Package update checks Handshake releases without sending project or session
-// data. The anonymous telemetry heartbeat runs on its own daily schedule in
-// internal/telemetry, not here.
+// data, and (unless opted out) auto-updates a managed-service install to the
+// newest release after verifying its SHA-256 checksum. The anonymous telemetry
+// heartbeat runs on its own daily schedule in internal/telemetry, not here.
 package update
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -115,11 +117,17 @@ func Due(status *db.UpdateStatus, now time.Time) bool {
 	return now.Sub(time.Unix(status.LastCheckedAt, 0)) >= interval
 }
 
-func Start(ctx context.Context, database *db.Database, installedVersion string) {
+func Start(ctx context.Context, database *db.Database, homeDir, installedVersion string) {
 	checker := NewChecker()
 	go func() {
 		for {
-			status, _, _ := checker.Check(ctx, database, installedVersion, false)
+			status, performed, _ := checker.Check(ctx, database, installedVersion, false)
+			if performed && status.LastError == "" && IsNewer(installedVersion, status.LatestVersion) {
+				// Best-effort: on success this replaces the binary and exits so
+				// the service manager relaunches on the new version; it never
+				// returns. On any skip or failure the daemon keeps running.
+				MaybeAutoUpdate(ctx, homeDir, installedVersion, status.LatestVersion, log.Printf)
+			}
 			delay := NextCheckDelay(status, checker.Now())
 			timer := time.NewTimer(delay)
 			select {
