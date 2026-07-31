@@ -1,28 +1,29 @@
 # Handshake
 
-
-
-Handshake is a local-first session portability daemon for AI coding agents.
-It runs silently in the background, keeping your sessions synced across
-Claude Code, OpenCode, Hermes, Codex, and Cursor. Hit a token limit and
-switch agents, your context is already there.
+Handshake is a daemon that moves coding sessions between AI coding agents.
+It operates on your machine only. It synchronizes your sessions between
+Claude Code, OpenCode, Hermes, Codex, and Cursor. If one agent stops at a
+token limit, you can continue the session in a different agent. Your context
+is already there.
 
 **Full documentation: [docs.gethandshake.dev](https://docs.gethandshake.dev)**
 
 ## How it works
 
-Handshake runs as a background daemon and hooks into each agent's native
-event system. Every time an agent finishes a response, Handshake syncs the
-session automatically. You never have to think about it.
+Handshake operates as a background daemon. It connects to the native event
+system of each agent. When an agent completes a response, Handshake saves the
+session automatically. No manual action is necessary.
 
-When you want to switch agents, just say:
+To move a session to a different agent, give this instruction to the new
+agent:
 
 ```
 restore my council spending session
 ```
 
-The new agent gets a full handoff brief; the original goal, decisions made,
-current state, files modified, and next steps.
+The new agent receives a full handoff brief. The brief contains the initial
+goal, the decisions, the current state, the changed files, and the next
+steps.
 
 ## Install
 
@@ -31,83 +32,95 @@ current state, files modified, and next steps.
 curl -fsSL https://gethandshake.dev/install.sh | sh
 ```
 
-
 **Mac (Homebrew):**
 ```bash
 brew install ThisisBankole/tools/handshake
 ```
 
-
-**From source (requires Go 1.25+):**
+**From source (Go 1.25 or later is necessary):**
 ```bash
 git clone https://github.com/ThisisBankole/handshake.git
 cd handshake
 go build -o handshake ./cmd/handshake
 ```
 
-When installed through curl in a terminal, the guided setup starts
-automatically. In a non-interactive environment, run it afterwards:
+If you install Handshake with curl in a terminal, the guided setup starts
+automatically. If your environment is not interactive, start the setup
+manually:
+
 ```bash
 handshake setup
 ```
 
-Takes about 30 seconds. Handshake registers with your agents, installs
-itself as a login service, and starts the daemon. After that it runs
-invisibly in the background.
+The setup takes approximately 30 seconds. The setup does these steps:
+
+1. It registers Handshake with your agents.
+2. It installs Handshake as a login service.
+3. It starts the daemon.
+
+After the setup, the daemon operates in the background. No attention is
+necessary.
 
 ## Project Knowledge
 
-Each Git-aware checkpoint also writes a private, deterministic OKF-compatible
-bundle at `~/.handshake/knowledge/<project-id>/`. It contains checkpoint and
-Git timelines plus size-limited, per-file text diffs. Session transcripts are
-not exported. Sensitive and generated paths are omitted and recorded as such
-in each diff index.
+Each checkpoint that has Git data writes a knowledge bundle to
+`~/.handshake/knowledge/<project-id>/`. The bundle is private and
+deterministic. It agrees with the Open Knowledge Format (OKF). The bundle
+contains a checkpoint timeline, a Git timeline, and text diffs for each
+file. Each diff has a size limit. Handshake does not export session
+transcripts. Handshake removes sensitive paths and generated paths. The
+diff index records each removed path.
 
-Agents can publish a `project-brief.md` and `repo-map.md` through the local
-`publish_project_knowledge` MCP tool. Each document declares the factual
-revision it used; Handshake rejects stale output and marks published documents
-stale after later checkpoints.
+Agents can publish a `project-brief.md` and a `repo-map.md` with the local
+MCP tool `publish_project_knowledge`. Each document declares the factual
+revision that the agent used. Handshake rejects a document that uses an old
+revision. When a new checkpoint occurs, Handshake sets the published
+documents to stale.
 
-Optionally enable a background writer to keep these two AI-authored documents
-current without asking the interactive agent to do the work:
+A background writer is available as an option. The background writer keeps
+the two AI-authored documents current. Then the interactive agent does not
+do this work. To configure the background writer and to see its
+configuration, use these commands:
 
 ```bash
 handshake knowledge author setup
 handshake knowledge author show
 ```
 
-Setup detects Claude Code, Codex, OpenCode, and Hermes, lets you choose one
-fallback writer, and asks for final approval because its model runs may consume
-quota. The daemon starts that CLI only after an active agent has had a short
-chance to publish both documents itself. Before starting the CLI, Handshake
-verifies that the documents are still stale for the latest factual revision. It
-never trusts terminal output as proof of success. Disable background model runs
-at any time with:
+The setup finds Claude Code, Codex, OpenCode, and Hermes. You select one
+fallback writer. The setup asks for your approval, because model runs can
+use your quota. The daemon first gives the active agent a short time to
+publish the two documents. Before the daemon starts the CLI, it makes sure
+that the documents are stale for the latest factual revision. The daemon
+does not accept terminal output as proof of success. To stop background
+model runs, use this command:
 
 ```bash
 handshake knowledge author off
 ```
 
-`handshake setup` and `handshake init` install Handshake's general and
-`knowledge-authoring` skills into the global skill location for Claude Code,
-Codex, OpenCode, and Hermes. Existing user-owned skills with the same name are
-left untouched. The general skill asks agents to report a cached available
-Handshake update before relevant work. Skill installation makes the workflow
-available to an agent;
-Claude Code also receives one Stop-hook continuation when a checkpoint leaves
-these documents stale, directing it to use the skill before the turn ends.
-OpenCode, Codex, and Hermes have the skill available as well. Background
-authoring uses the corresponding non-interactive CLI command, so it works even
-when that agent is not the one currently being used interactively.
+The commands `handshake setup` and `handshake init` install two skills: the
+general skill and the `knowledge-authoring` skill. The skills go into the
+global skill location for Claude Code, Codex, OpenCode, and Hermes.
+Handshake does not change your skills that have the same name. The general
+skill tells each agent to report a cached Handshake update before
+applicable work. When a checkpoint sets the documents to stale, Claude Code
+receives one Stop-hook instruction. The instruction tells Claude Code to
+use the skill before the turn ends. The skill is also available in
+OpenCode, Codex, and Hermes. Background authoring uses the non-interactive
+CLI command of the selected agent. Because of this, background authoring
+operates when that agent is not in interactive use.
 
-Cursor receives Handshake's MCP server and a managed Stop hook. The hook imports
-Cursor's local transcript after a completed turn. If project knowledge is stale,
-it sends Cursor one follow-up instruction to publish the two documents through
-MCP. Cursor is not yet available as an unattended background writer.
+Cursor receives the Handshake MCP server and a managed Stop hook. The hook
+imports the local Cursor transcript after each completed turn. If the
+project knowledge is stale, the hook sends one instruction to Cursor. The
+instruction tells Cursor to publish the two documents through MCP. Cursor
+is not available as an unattended background writer.
 
 ## Switching agents
 
-When you want to continue work in a different agent:
+To continue your work in a different agent, give these instructions to the
+agent:
 
 ```
 list my sessions
@@ -117,9 +130,10 @@ list my sessions
 restore my auth refactor session
 ```
 
-That's it. The receiving agent picks up with full context.
+The new agent continues with the full context.
 
-There's also a CLI:
+A CLI is also available:
+
 ```bash
 handshake list
 handshake handoff "my session title"
@@ -127,7 +141,8 @@ handshake handoff "my session title"
 
 ## Manual checkpoint
 
-If you want to save a specific moment before switching agents, ask your agent:
+To save the session at a specific point, give this instruction to your
+agent:
 
 ```
 checkpoint this session
@@ -142,17 +157,18 @@ checkpoint this session
 
 ## Configuration
 
-Handshake defaults to `localhost:8765`. If that port is already in use,
-`handshake setup` detects the conflict automatically and picks the next
-free port — no manual action needed. The setup wizard will tell you which
-port was chosen and register all agents with the correct URL.
+The default address of the daemon is `localhost:8765`. If this port is in
+use, `handshake setup` finds the conflict and selects the next free port.
+No manual action is necessary. The setup shows the selected port. The setup
+registers all agents with the correct URL.
 
-**To pin a specific port** (optional), set these before running `handshake setup`:
+To set a specific port, set these variables before you run
+`handshake setup`:
 
 | Variable | Purpose |
 |---|---|
-| `HANDSHAKE_ADDR` | Address the daemon binds to (e.g. `localhost:8766`) |
-| `HANDSHAKE_URL` | MCP endpoint registered with agents (e.g. `http://localhost:8766/mcp`) |
+| `HANDSHAKE_ADDR` | The address that the daemon attaches to (example: `localhost:8766`) |
+| `HANDSHAKE_URL` | The MCP endpoint that Handshake registers with the agents (example: `http://localhost:8766/mcp`) |
 
 ```bash
 export HANDSHAKE_ADDR=localhost:8766
@@ -160,24 +176,27 @@ export HANDSHAKE_URL=http://localhost:8766/mcp
 handshake setup
 ```
 
-**Changing the port on an existing service install (macOS):**
-Add an `EnvironmentVariables` block to the launchd plist at
-`~/Library/LaunchAgents/com.handshake.serve.plist`, then re-run `handshake setup`
-to update agent registrations:
+To change the port of an installed service on macOS, do these steps:
 
-```xml
-<key>EnvironmentVariables</key>
-<dict>
-  <key>HANDSHAKE_ADDR</key><string>localhost:8766</string>
-  <key>HANDSHAKE_URL</key><string>http://localhost:8766/mcp</string>
-</dict>
-```
+1. Add an `EnvironmentVariables` block to the launchd plist at
+   `~/Library/LaunchAgents/com.handshake.serve.plist`:
 
-Then reload:
-```bash
-launchctl unload ~/Library/LaunchAgents/com.handshake.serve.plist
-launchctl load  ~/Library/LaunchAgents/com.handshake.serve.plist
-```
+   ```xml
+   <key>EnvironmentVariables</key>
+   <dict>
+     <key>HANDSHAKE_ADDR</key><string>localhost:8766</string>
+     <key>HANDSHAKE_URL</key><string>http://localhost:8766/mcp</string>
+   </dict>
+   ```
+
+2. Run `handshake setup` again to update the agent registrations.
+
+3. Load the service again:
+
+   ```bash
+   launchctl unload ~/Library/LaunchAgents/com.handshake.serve.plist
+   launchctl load  ~/Library/LaunchAgents/com.handshake.serve.plist
+   ```
 
 ## Uninstall
 
@@ -185,26 +204,13 @@ launchctl load  ~/Library/LaunchAgents/com.handshake.serve.plist
 handshake uninstall
 ```
 
-Removes Handshake from all agent configs, stops the daemon, and optionally
-deletes the session database and binary.
+The command removes Handshake from all agent configurations. It stops the
+daemon. The command asks if you want to delete the session database and the
+binary.
 
 ## Privacy
 
-Handshake runs entirely on your machine. The daemon binds to `localhost:8765`
-and is not accessible from the network. No cloud sync, no accounts. Your
-sessions are stored locally at `~/.handshake/sessions.db`.
-
-### Anonymous usage ping
-
-To count installs and active versions, Handshake sends two anonymous events:
-one when setup completes, and a weekly heartbeat piggybacked on the existing
-release check. Each event contains only the Handshake version, operating
-system, architecture, on install the names of detected agents, and a random
-per-machine ID stored at `~/.handshake/telemetry_id`. No session content,
-project names, paths, or account information is ever sent.
-
-Opt out at any time:
-
-```sh
-export HANDSHAKE_NO_TELEMETRY=1
-```
+Handshake operates on your machine only. The daemon attaches to
+`localhost:8765`. The network cannot get access to the daemon. Handshake
+has no cloud synchronization and no accounts. Handshake keeps your sessions
+in the local file `~/.handshake/sessions.db`.
