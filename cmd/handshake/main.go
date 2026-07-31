@@ -19,6 +19,7 @@ import (
 	"handshake/internal/git"
 	"handshake/internal/server"
 	"handshake/internal/sessionmatch"
+	"handshake/internal/telemetry"
 	"handshake/internal/timeline"
 	"handshake/internal/tui"
 	"handshake/internal/update"
@@ -198,7 +199,10 @@ func serveCmd(homeDir, dbPath string) {
 
 	srv := server.New("handshake", version, homeDir, database)
 	go authoring.NewWorker(database, homeDir, nil).WithMCPURL("http://" + addr + "/mcp").Start(context.Background())
-	update.Start(context.Background(), database, homeDir, version)
+	update.Start(context.Background(), database, version)
+	telemetry.StartDaily(context.Background(), homeDir, version, func(sinceUnix int64) map[string]any {
+		return heartbeatProperties(database, homeDir, sinceUnix)
+	})
 	fmt.Printf("Handshake %s listening on http://%s\n", version, addr)
 	fmt.Printf("  MCP endpoint:    http://%s/mcp\n", addr)
 	fmt.Printf("  Ingest endpoint: http://%s/ingest\n", addr)
@@ -332,10 +336,36 @@ func listCmd(homeDir, dbPath string) {
 // browseCmd runs the interactive session browser. If the user confirms a
 // handoff inside the TUI, the packet and brief are printed after the
 // terminal is restored — same output shape as `handshake handoff`.
+// heartbeatProperties gathers the extra fields for the daily anonymous
+// heartbeat: feature-usage counts since the last heartbeat, the agent names
+// with session activity in that window, and whether the background writer is
+// enabled. Counts, booleans, and fixed enum names only.
+func heartbeatProperties(database *db.Database, homeDir string, sinceUnix int64) map[string]any {
+	properties := map[string]any{}
+	if counters, err := database.DrainTelemetryCounters(); err == nil {
+		for name, count := range counters {
+			properties[name] = count
+		}
+	}
+	if agents, err := database.ActiveAgentsSince(sinceUnix); err == nil && len(agents) > 0 {
+		properties["active_agents"] = agents
+	}
+	if config, err := authoring.LoadConfig(homeDir); err == nil {
+		properties["authoring_enabled"] = config.Enabled
+		if config.Enabled {
+			properties["authoring_runner"] = string(config.Runner)
+		}
+	}
+	return properties
+}
+
 func browseCmd(homeDir, dbPath string) {
 	database := openDB(dbPath)
 	defer database.Close()
 
+	if !telemetry.Disabled() {
+		_ = database.IncrementTelemetryCounter("tui_opens")
+	}
 	session, err := tui.Run(database, homeDir)
 	if err != nil {
 		fmt.Printf("Browser error: %v\n", err)

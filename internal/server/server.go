@@ -21,6 +21,7 @@ import (
 	"handshake/internal/git"
 	"handshake/internal/knowledge"
 	"handshake/internal/sessionmatch"
+	"handshake/internal/telemetry"
 	"handshake/internal/update"
 )
 
@@ -48,6 +49,15 @@ type sessionListEntry struct {
 	WorkingDirectory string `json:"working_directory"`
 	ProjectName      string `json:"project_name"`
 	ProjectID        string `json:"project_id"`
+}
+
+// count bumps a local feature-usage tally with a fixed name for the daily
+// anonymous heartbeat. When the user opted out, nothing is recorded at all.
+func (s *Server) count(name string) {
+	if telemetry.Disabled() {
+		return
+	}
+	_ = s.db.IncrementTelemetryCounter(name)
 }
 
 func New(name, version, homeDir string, database *db.Database) *Server {
@@ -319,6 +329,7 @@ func (s *Server) handleGetProjectKnowledgeContext(request mcp.CallToolRequest) (
 }
 
 func (s *Server) handlePublishProjectKnowledge(request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.count("knowledge_publishes")
 	projectID := request.GetString("project_id", "")
 	documentType := request.GetString("type", "")
 	content := request.GetString("content", "")
@@ -340,6 +351,7 @@ func (s *Server) handlePublishProjectKnowledge(request mcp.CallToolRequest) (*mc
 }
 
 func (s *Server) handleCheckpointSession(request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.count("checkpoints")
 	sessionID := request.GetString("session_id", "")
 	agent := request.GetString("agent", "")
 	title := request.GetString("title", "")
@@ -420,6 +432,7 @@ func (s *Server) readNativeSession(agent, sessionID string) (*adapters.SessionDa
 }
 
 func (s *Server) handleListSessions(request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.count("session_lists")
 	agent := request.GetString("agent", "")
 	var warnings []string
 
@@ -533,6 +546,11 @@ func valueOrDash(value string) string {
 }
 
 func (s *Server) handleBriefRequest(request mcp.CallToolRequest, restore bool) (*mcp.CallToolResult, error) {
+	if restore {
+		s.count("restores")
+	} else {
+		s.count("briefs")
+	}
 	title := request.GetString("title", "")
 	if title == "" {
 		return mcp.NewToolResultError("title is required"), nil
@@ -627,6 +645,7 @@ func (s *Server) findSession(query string) (*db.Session, error) {
 }
 
 func (s *Server) handleSearchSession(request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.count("searches")
 	title := request.GetString("title", "")
 	query := request.GetString("query", "")
 	limit := request.GetInt("limit", 5)
@@ -656,6 +675,7 @@ func (s *Server) handleSearchSession(request mcp.CallToolRequest) (*mcp.CallTool
 }
 
 func (s *Server) handleSearchAllSessions(request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.count("searches")
 	query := request.GetString("query", "")
 	limit := request.GetInt("limit", 10)
 	agent := request.GetString("agent", "")

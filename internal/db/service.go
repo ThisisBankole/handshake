@@ -333,6 +333,11 @@ func (d *Database) initSchema() error {
 		last_error        TEXT NOT NULL DEFAULT ''
 	);
 
+	CREATE TABLE IF NOT EXISTS telemetry_counters (
+		name  TEXT PRIMARY KEY,
+		count INTEGER NOT NULL DEFAULT 0
+	);
+
 	CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 		content,
 		content='messages',

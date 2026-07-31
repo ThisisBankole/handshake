@@ -135,11 +135,13 @@ func setupCmd(homeDir, dbPath string) {
 	// and exit silently, so we just verify the service-managed daemon is up.
 	// Only when no service was installed do we offer to start a one-off daemon.
 
+	daemonStarted := false
 	if serviceInstalled {
 		fmt.Println("Step 3 of 3 — Verify the daemon is running.")
 		fmt.Println()
 		fmt.Printf("  Checking daemon on %s...\n", resolvedAddr)
 		if daemonReady(resolvedAddr) {
+			daemonStarted = true
 			fmt.Printf("  ✓ Handshake is running on %s\n", resolvedAddr)
 		} else {
 			fmt.Printf("  ✗ Daemon did not respond on %s\n", resolvedAddr)
@@ -158,6 +160,7 @@ func setupCmd(homeDir, dbPath string) {
 				fmt.Printf("  ✗ Could not start daemon: %v\n", err)
 				fmt.Println("  Start manually with: handshake serve")
 			} else if daemonReady(resolvedAddr) {
+				daemonStarted = true
 				fmt.Printf("  ✓ Handshake is running on %s\n", resolvedAddr)
 			} else {
 				fmt.Printf("  ✗ Daemon did not respond on %s\n", resolvedAddr)
@@ -180,10 +183,10 @@ func setupCmd(homeDir, dbPath string) {
 	fmt.Println("Your sessions are stored locally at ~/.handshake/sessions.db")
 	fmt.Println("Session checkpoints stay local. Any enabled background writer uses its selected agent CLI and provider account.")
 	if !telemetry.Disabled() {
-		fmt.Println("An anonymous install ping (version, OS, and agent names only) helps count installs.")
-		fmt.Println("Set HANDSHAKE_NO_TELEMETRY=1 to disable.")
+		fmt.Println("Anonymous usage pings (version, OS, agent names, and feature-usage counts only)")
+		fmt.Println("help improve Handshake. Set HANDSHAKE_NO_TELEMETRY=1 to disable.")
 	}
-	telemetry.Installed(homeDir, version, detectedAgents(homeDir))
+	telemetry.Installed(homeDir, version, detectedAgents(homeDir), serviceInstalled, daemonStarted)
 	fmt.Println()
 }
 
@@ -213,6 +216,10 @@ func detectedAgents(homeDir string) []string {
 func uninstallCmd(homeDir string) {
 	fmt.Println("This will remove Handshake from your machine.")
 	fmt.Println()
+
+	// Best-effort churn signal, sent before any files are removed. Reads the
+	// existing anonymous ID only; never creates telemetry state on the way out.
+	telemetry.Uninstalled(homeDir, version)
 
 	// Stop and remove the service first
 	fmt.Println("Stopping the daemon...")

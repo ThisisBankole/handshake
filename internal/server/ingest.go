@@ -60,6 +60,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	s.count("ingests")
 
 	var payload ingestPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
